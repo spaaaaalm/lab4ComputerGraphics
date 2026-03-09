@@ -33,8 +33,8 @@ struct Vertex
 struct ObjectConstants
 {
     XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
-    float      TileCount = 8.0f;  // количество клеток шахматной доски
-    XMFLOAT3   Pad = { 0,0,0 };
+    XMFLOAT2   TexOffset = { 0.0f, 0.0f };
+    XMFLOAT2   TexScale = { 1.0f, 1.0f };
 };
 
 // ============================================================
@@ -146,13 +146,6 @@ private:
     ComPtr<ID3D12Resource> mWhiteTexResource = nullptr;
     ComPtr<ID3D12Resource> mWhiteTexUploadHeap = nullptr;
 
-    // Floor checkerboard
-    ComPtr<ID3DBlob> mFloorVSByteCode = nullptr;
-    ComPtr<ID3DBlob> mFloorPSByteCode = nullptr;
-    ComPtr<ID3D12PipelineState> mFloorPSO = nullptr;
-    int mFloorSubmeshIndex = -1;      // индекс пола в mMaterialSubmeshes
-    int mFloorTex0SrvIndex = -1;      // SRV индекс первой текстуры шахматной доски
-    int mFloorTex1SrvIndex = -1;      // SRV индекс второй текстуры шахматной доски
 };
 
 // ============================================================
@@ -229,7 +222,10 @@ void BoxApp::Update(const GameTimer& gt)
 
     ObjectConstants objConstants;
     XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
-    objConstants.TileCount = 8.0f;  // 8x8 шахматная доска
+
+    float totalTime = gt.TotalTime();
+    objConstants.TexOffset = XMFLOAT2(totalTime * 0.05f, 0.0f);
+    objConstants.TexScale = XMFLOAT2(1.0f, 1.0f);
 
     mObjectCB->CopyData(0, objConstants);
 }
@@ -239,7 +235,7 @@ void BoxApp::Draw(const GameTimer& gt)
     ThrowIfFailed(mDirectCmdListAlloc->Reset());
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), mPSO.Get()));
 
-    mCommandList->RSSetViewports(1, &mScreenViewport);
+        mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
 
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
@@ -257,29 +253,25 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
 
+    // Set geometry buffers (shared across all submeshes)
     mCommandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
     mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // Root 0: CBV
+    // Root parameter 0: CBV descriptor table
     mCommandList->SetGraphicsRootDescriptorTable(0,
         mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
-    // === Pass 1: все submesh-и КРОМЕ пола (обычный шейдер) ===
-    mCommandList->SetPipelineState(mPSO.Get());
 
-    for (int i = 0; i < (int)mMaterialSubmeshes.size(); ++i)
+
+    // Draw each material submesh with its own texture
+    for (const auto& submesh : mMaterialSubmeshes)
     {
-        if (i == mFloorSubmeshIndex)
-            continue; // пол рисуем отдельно
-
-        const auto& submesh = mMaterialSubmeshes[i];
-
         int srvHeapIndex;
         if (submesh.TextureSrvIndex < 0)
-            srvHeapIndex = mDefaultTexSrvOffset;
+            srvHeapIndex = mDefaultTexSrvOffset; // slot 1 = white
         else
-            srvHeapIndex = mTextureSrvStartOffset + submesh.TextureSrvIndex;
+            srvHeapIndex = mTextureSrvStartOffset + submesh.TextureSrvIndex; // slot 2+i
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(
             mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
@@ -287,38 +279,10 @@ void BoxApp::Draw(const GameTimer& gt)
 
         mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
 
-        // Root 2: установим ту же текстуру (color.hlsl не использует t1, но root signature требует)
-        mCommandList->SetGraphicsRootDescriptorTable(2, texHandle);
-
         mCommandList->DrawIndexedInstanced(
             submesh.IndexCount, 1,
             submesh.StartIndexLocation,
             submesh.BaseVertexLocation, 0);
-    }
-
-    // === Pass 2: пол (шахматный шейдер) ===
-    if (mFloorSubmeshIndex >= 0)
-    {
-        mCommandList->SetPipelineState(mFloorPSO.Get());
-
-        const auto& floorSubmesh = mMaterialSubmeshes[mFloorSubmeshIndex];
-
-        // Root 1: текстура 0 шахматной доски
-        CD3DX12_GPU_DESCRIPTOR_HANDLE tex0Handle(
-            mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
-        tex0Handle.Offset(mTextureSrvStartOffset + mFloorTex0SrvIndex, mCbvSrvUavDescriptorSize);
-        mCommandList->SetGraphicsRootDescriptorTable(1, tex0Handle);
-
-        // Root 2: текстура 1 шахматной доски
-        CD3DX12_GPU_DESCRIPTOR_HANDLE tex1Handle(
-            mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
-        tex1Handle.Offset(mTextureSrvStartOffset + mFloorTex1SrvIndex, mCbvSrvUavDescriptorSize);
-        mCommandList->SetGraphicsRootDescriptorTable(2, tex1Handle);
-
-        mCommandList->DrawIndexedInstanced(
-            floorSubmesh.IndexCount, 1,
-            floorSubmesh.StartIndexLocation,
-            floorSubmesh.BaseVertexLocation, 0);
     }
 
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
@@ -335,6 +299,7 @@ void BoxApp::Draw(const GameTimer& gt)
 
     FlushCommandQueue();
 }
+
 void BoxApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
     mLastMousePos.x = x;
@@ -620,17 +585,14 @@ void BoxApp::BuildRootSignature()
     CD3DX12_DESCRIPTOR_RANGE cbvTable;
     cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0); // b0
 
-    CD3DX12_DESCRIPTOR_RANGE srvTable0;
-    srvTable0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0
+        CD3DX12_DESCRIPTOR_RANGE srvTable;
+    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0); // t0
 
-    CD3DX12_DESCRIPTOR_RANGE srvTable1;
-    srvTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // t1
+    CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+    slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
+    slotRootParameter[1].InitAsDescriptorTable(1, &srvTable);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[3];
-    slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);   // root 0: CBV
-    slotRootParameter[1].InitAsDescriptorTable(1, &srvTable0);  // root 1: SRV t0
-    slotRootParameter[2].InitAsDescriptorTable(1, &srvTable1);  // root 2: SRV t1
-
+    // Static sampler: linear filter + wrap (tiling)
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -642,11 +604,11 @@ void BoxApp::BuildRootSignature()
     sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
     sampler.MinLOD = 0.0f;
     sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister = 0;
+    sampler.ShaderRegister = 0;   // s0
     sampler.RegisterSpace = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, 1, &sampler,
+    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 1, &sampler,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -666,15 +628,25 @@ void BoxApp::BuildRootSignature()
         serializedRootSig->GetBufferSize(),
         IID_PPV_ARGS(&mRootSignature)));
 }
-
 // ============================================================
 void BoxApp::BuildShadersAndInputLayout()
 {
+    // Проверим что файл существует
+    wchar_t fullPath[MAX_PATH];
+    GetFullPathNameW(L"..\\Shaders\\color.hlsl", MAX_PATH, fullPath, nullptr);
+
+    char buf[512];
+    sprintf_s(buf, "Looking for shader: %ls\n", fullPath);
+    OutputDebugStringA(buf);
+
+    DWORD attribs = GetFileAttributesW(fullPath);
+    if (attribs == INVALID_FILE_ATTRIBUTES)
+        OutputDebugStringA("  SHADER FILE NOT FOUND!\n");
+    else
+        OutputDebugStringA("  Shader file exists\n");
+
     mvsByteCode = d3dUtil::CompileShader(L"..\\Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
     mpsByteCode = d3dUtil::CompileShader(L"..\\Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
-
-    mFloorVSByteCode = d3dUtil::CompileShader(L"..\\Shaders\\floor.hlsl", nullptr, "VS", "vs_5_0");
-    mFloorPSByteCode = d3dUtil::CompileShader(L"..\\Shaders\\floor.hlsl", nullptr, "PS", "ps_5_0");
 
     mInputLayout =
     {
@@ -802,20 +774,6 @@ void BoxApp::BuildBoxGeometry()
         ms.IndexCount = (UINT)indices.size() - ms.StartIndexLocation;
         mMaterialSubmeshes.push_back(ms);
     }
-    // Найти пол и выбрать 2 текстуры для шахматной доски
-    for (int i = 0; i < (int)mMaterialSubmeshes.size(); ++i)
-    {
-        if (mMaterialSubmeshes[i].MaterialName == "floor")
-        {
-            mFloorSubmeshIndex = i;
-            break;
-        }
-    }
-
-    // Выбираем две любые загруженные текстуры для шахматной доски
-    // Берём bricks и ceiling (индексы 4 и 5 в mTextures)
-    mFloorTex0SrvIndex = 4;  // spnza_bricks_a_diff
-    mFloorTex1SrvIndex = 5;  // sponza_ceiling_a_diff
 
     // ---------- Create GPU buffers ----------
     const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
@@ -874,7 +832,7 @@ void BoxApp::BuildPSO()
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc;
     ZeroMemory(&psoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
 
-    psoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+        psoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
     psoDesc.pRootSignature = mRootSignature.Get();
     psoDesc.VS = { reinterpret_cast<BYTE*>(mvsByteCode->GetBufferPointer()), mvsByteCode->GetBufferSize() };
     psoDesc.PS = { reinterpret_cast<BYTE*>(mpsByteCode->GetBufferPointer()), mpsByteCode->GetBufferSize() };
@@ -890,10 +848,4 @@ void BoxApp::BuildPSO()
     psoDesc.DSVFormat = mDepthStencilFormat;
 
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPSO)));
-
-    // Floor PSO — same settings, different shaders
-    psoDesc.VS = { reinterpret_cast<BYTE*>(mFloorVSByteCode->GetBufferPointer()), mFloorVSByteCode->GetBufferSize() };
-    psoDesc.PS = { reinterpret_cast<BYTE*>(mFloorPSByteCode->GetBufferPointer()), mFloorPSByteCode->GetBufferSize() };
-
-    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mFloorPSO)));
 }
