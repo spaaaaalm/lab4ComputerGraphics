@@ -33,8 +33,8 @@ struct Vertex
 struct ObjectConstants
 {
     XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
-    float      TileCount = 8.0f;  // количество клеток шахматной доски
-    XMFLOAT3   Pad = { 0,0,0 };
+    XMFLOAT2   TexOffset = { 0.0f, 0.0f };
+    XMFLOAT2   TexScale = { 1.0f, 1.0f };
 };
 
 // ============================================================
@@ -108,7 +108,6 @@ private:
 private:
     ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
     ComPtr<ID3D12DescriptorHeap> mCbvSrvHeap = nullptr;     // combined CBV+SRV heap
-
     std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
 
     std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
@@ -150,9 +149,10 @@ private:
     ComPtr<ID3DBlob> mFloorVSByteCode = nullptr;
     ComPtr<ID3DBlob> mFloorPSByteCode = nullptr;
     ComPtr<ID3D12PipelineState> mFloorPSO = nullptr;
-    int mFloorSubmeshIndex = -1;      // индекс пола в mMaterialSubmeshes
-    int mFloorTex0SrvIndex = -1;      // SRV индекс первой текстуры шахматной доски
-    int mFloorTex1SrvIndex = -1;      // SRV индекс второй текстуры шахматной доски
+    int mFloorSubmeshIndex = -1;
+    int mFloorTex0SrvIndex = -1;
+    int mFloorTex1SrvIndex = -1;
+
 };
 
 // ============================================================
@@ -229,7 +229,10 @@ void BoxApp::Update(const GameTimer& gt)
 
     ObjectConstants objConstants;
     XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
-    objConstants.TileCount = 8.0f;  // 8x8 шахматная доска
+
+    float totalTime = gt.TotalTime();
+    objConstants.TexOffset = XMFLOAT2(totalTime * 0.05f, 0.0f);
+    objConstants.TexScale = XMFLOAT2(1.0f, 1.0f);
 
     mObjectCB->CopyData(0, objConstants);
 }
@@ -265,13 +268,13 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->SetGraphicsRootDescriptorTable(0,
         mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
-    // === Pass 1: все submesh-и КРОМЕ пола (обычный шейдер) ===
+    // === Обычные материалы (кроме пола) ===
     mCommandList->SetPipelineState(mPSO.Get());
 
     for (int i = 0; i < (int)mMaterialSubmeshes.size(); ++i)
     {
         if (i == mFloorSubmeshIndex)
-            continue; // пол рисуем отдельно
+            continue;
 
         const auto& submesh = mMaterialSubmeshes[i];
 
@@ -286,8 +289,7 @@ void BoxApp::Draw(const GameTimer& gt)
         texHandle.Offset(srvHeapIndex, mCbvSrvUavDescriptorSize);
 
         mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
-
-        // Root 2: установим ту же текстуру (color.hlsl не использует t1, но root signature требует)
+        // Root 2 не нужен для color.hlsl, но привяжем ту же текстуру чтобы не было ошибок валидации
         mCommandList->SetGraphicsRootDescriptorTable(2, texHandle);
 
         mCommandList->DrawIndexedInstanced(
@@ -296,20 +298,20 @@ void BoxApp::Draw(const GameTimer& gt)
             submesh.BaseVertexLocation, 0);
     }
 
-    // === Pass 2: пол (шахматный шейдер) ===
+    // === Пол (шахматный шейдер) ===
     if (mFloorSubmeshIndex >= 0)
     {
         mCommandList->SetPipelineState(mFloorPSO.Get());
 
         const auto& floorSubmesh = mMaterialSubmeshes[mFloorSubmeshIndex];
 
-        // Root 1: текстура 0 шахматной доски
+        // Root 1: текстура 0
         CD3DX12_GPU_DESCRIPTOR_HANDLE tex0Handle(
             mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
         tex0Handle.Offset(mTextureSrvStartOffset + mFloorTex0SrvIndex, mCbvSrvUavDescriptorSize);
         mCommandList->SetGraphicsRootDescriptorTable(1, tex0Handle);
 
-        // Root 2: текстура 1 шахматной доски
+        // Root 2: текстура 1
         CD3DX12_GPU_DESCRIPTOR_HANDLE tex1Handle(
             mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
         tex1Handle.Offset(mTextureSrvStartOffset + mFloorTex1SrvIndex, mCbvSrvUavDescriptorSize);
@@ -335,6 +337,7 @@ void BoxApp::Draw(const GameTimer& gt)
 
     FlushCommandQueue();
 }
+
 void BoxApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
     mLastMousePos.x = x;
@@ -627,9 +630,9 @@ void BoxApp::BuildRootSignature()
     srvTable1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1); // t1
 
     CD3DX12_ROOT_PARAMETER slotRootParameter[3];
-    slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);   // root 0: CBV
-    slotRootParameter[1].InitAsDescriptorTable(1, &srvTable0);  // root 1: SRV t0
-    slotRootParameter[2].InitAsDescriptorTable(1, &srvTable1);  // root 2: SRV t1
+    slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
+    slotRootParameter[1].InitAsDescriptorTable(1, &srvTable0);
+    slotRootParameter[2].InitAsDescriptorTable(1, &srvTable1);
 
     D3D12_STATIC_SAMPLER_DESC sampler = {};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -666,7 +669,6 @@ void BoxApp::BuildRootSignature()
         serializedRootSig->GetBufferSize(),
         IID_PPV_ARGS(&mRootSignature)));
 }
-
 // ============================================================
 void BoxApp::BuildShadersAndInputLayout()
 {
@@ -802,7 +804,7 @@ void BoxApp::BuildBoxGeometry()
         ms.IndexCount = (UINT)indices.size() - ms.StartIndexLocation;
         mMaterialSubmeshes.push_back(ms);
     }
-    // Найти пол и выбрать 2 текстуры для шахматной доски
+    // Найти пол
     for (int i = 0; i < (int)mMaterialSubmeshes.size(); ++i)
     {
         if (mMaterialSubmeshes[i].MaterialName == "floor")
@@ -812,8 +814,7 @@ void BoxApp::BuildBoxGeometry()
         }
     }
 
-    // Выбираем две любые загруженные текстуры для шахматной доски
-    // Берём bricks и ceiling (индексы 4 и 5 в mTextures)
+    // Две текстуры для шахматной доски (bricks и ceiling)
     mFloorTex0SrvIndex = 4;  // spnza_bricks_a_diff
     mFloorTex1SrvIndex = 5;  // sponza_ceiling_a_diff
 
@@ -891,7 +892,7 @@ void BoxApp::BuildPSO()
 
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPSO)));
 
-    // Floor PSO — same settings, different shaders
+    // Floor PSO — те же настройки, другие шейдеры
     psoDesc.VS = { reinterpret_cast<BYTE*>(mFloorVSByteCode->GetBufferPointer()), mFloorVSByteCode->GetBufferSize() };
     psoDesc.PS = { reinterpret_cast<BYTE*>(mFloorPSByteCode->GetBufferPointer()), mFloorPSByteCode->GetBufferSize() };
 
