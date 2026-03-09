@@ -2,6 +2,10 @@
 #include "../../Common/MathHelper.h"
 #include "../../Common/UploadBuffer.h"
 #include "../../Common/DDSTextureLoader.h"
+#include "../../Common/LightSystem.h"
+#include "../../Common/RenderingSystem.h"
+
+
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
@@ -24,8 +28,10 @@ using namespace DirectX::PackedVector;
 struct Vertex
 {
     XMFLOAT3 Pos;
+    XMFLOAT3 Normal;
     XMFLOAT2 Tex;
 };
+
 
 // ============================================================
 // Per-object constant buffer — must match cbuffer in HLSL
@@ -59,6 +65,7 @@ struct LoadedTexture
     ComPtr<ID3D12Resource> Resource = nullptr;
     ComPtr<ID3D12Resource> UploadHeap = nullptr;
 };
+
 
 // ============================================================
 // Helper: string -> wstring
@@ -98,12 +105,13 @@ private:
     void BuildDescriptorHeaps();
     void BuildConstantBuffers();
     void BuildRootSignature();
-    void BuildShadersAndInputLayout();
+    // void BuildShadersAndInputLayout();
     void BuildBoxGeometry();
-    void BuildPSO();
+    // void BuildPSO();
 
     // Create a white 1x1 fallback texture for materials without map_Kd
     void CreateDefaultWhiteTexture();
+    void SetupLights();
 
 private:
     ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
@@ -113,12 +121,12 @@ private:
 
     std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
 
-    ComPtr<ID3DBlob> mvsByteCode = nullptr;
-    ComPtr<ID3DBlob> mpsByteCode = nullptr;
+    // ComPtr<ID3DBlob> mvsByteCode = nullptr;
+    // ComPtr<ID3DBlob> mpsByteCode = nullptr;
 
-    std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+    // std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
-    ComPtr<ID3D12PipelineState> mPSO = nullptr;
+    // ComPtr<ID3D12PipelineState> mPSO = nullptr;
 
     XMFLOAT4X4 mWorld = MathHelper::Identity4x4();
     XMFLOAT4X4 mView = MathHelper::Identity4x4();
@@ -145,6 +153,9 @@ private:
 
     ComPtr<ID3D12Resource> mWhiteTexResource = nullptr;
     ComPtr<ID3D12Resource> mWhiteTexUploadHeap = nullptr;
+
+    std::unique_ptr<RenderingSystem> mRenderingSystem;
+    std::unique_ptr<UploadBuffer<GBufferObjectConstants>> mGBufferObjectCB;
 
 };
 
@@ -179,13 +190,53 @@ bool BoxApp::Initialize()
 
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
+    OutputDebugStringA("=== Starting RenderingSystem initialization ===\n");
+
+    // 1. Сначала RenderingSystem
+    mRenderingSystem = std::make_unique<RenderingSystem>();
+
+    OutputDebugStringA("=== RenderingSystem created, calling Initialize ===\n");
+
+    mRenderingSystem->Initialize(
+        md3dDevice.Get(),
+        mCommandList.Get(),
+        mClientWidth,
+        mClientHeight,
+        mBackBufferFormat,
+        mDepthStencilFormat
+    );
+
+    OutputDebugStringA("=== RenderingSystem initialized ===\n");
+
+    // 2. Настройка света
+    SetupLights();
+
+    OutputDebugStringA("=== Lights setup done ===\n");
+
+    // 3. Загрузка текстур
     LoadTextures();
+
+    OutputDebugStringA("=== Textures loaded ===\n");
+
+    // 4. Descriptor heaps
     BuildDescriptorHeaps();
+
+    OutputDebugStringA("=== Descriptor heaps built ===\n");
+
+    // 5. Константные буферы
     BuildConstantBuffers();
+
+    OutputDebugStringA("=== Constant buffers built ===\n");
+
+    // 6. Root signature
     BuildRootSignature();
-    BuildShadersAndInputLayout();
+
+    OutputDebugStringA("=== Root signature built ===\n");
+
+    // 7. Геометрия
     BuildBoxGeometry();
-    BuildPSO();
+
+    OutputDebugStringA("=== Geometry built ===\n");
 
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
@@ -193,12 +244,20 @@ bool BoxApp::Initialize()
 
     FlushCommandQueue();
 
+    OutputDebugStringA("=== Initialize complete ===\n");
+
     return true;
 }
 
 void BoxApp::OnResize()
 {
     D3DApp::OnResize();
+
+    if (mRenderingSystem)
+    {
+        mRenderingSystem->OnResize(md3dDevice.Get(), mClientWidth, mClientHeight);
+    }
+
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
     XMStoreFloat4x4(&mProj, P);
 }
@@ -227,56 +286,75 @@ void BoxApp::Update(const GameTimer& gt)
     objConstants.TexOffset = XMFLOAT2(totalTime * 0.05f, 0.0f);
     objConstants.TexScale = XMFLOAT2(1.0f, 1.0f);
 
-    mObjectCB->CopyData(0, objConstants);
+    // mObjectCB->CopyData(0, objConstants);
 }
 
 void BoxApp::Draw(const GameTimer& gt)
 {
     ThrowIfFailed(mDirectCmdListAlloc->Reset());
-    ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), mPSO.Get()));
+    ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
-        mCommandList->RSSetViewports(1, &mScreenViewport);
-    mCommandList->RSSetScissorRects(1, &mScissorRect);
+    // Обновляем матрицы камеры
+    float x = mRadius * sinf(mPhi) * cosf(mTheta);
+    float z = mRadius * sinf(mPhi) * sinf(mTheta);
+    float y = mRadius * cosf(mPhi);
 
-    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
-        CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+    XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
+    XMVECTOR target = XMVectorZero();
+    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 
-    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::LightSteelBlue, 0, nullptr);
-    mCommandList->ClearDepthStencilView(DepthStencilView(),
-        D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+    XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
+    XMMATRIX proj = XMLoadFloat4x4(&mProj);
 
-    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
+    mRenderingSystem->SetViewProjection(view, proj);
+    mRenderingSystem->SetCameraPosition(XMFLOAT3(x, y, z));
 
+    // ==================== Geometry Pass ====================
+    mRenderingSystem->BeginGeometryPass(mCommandList.Get());
+
+    // Устанавливаем descriptor heaps
     ID3D12DescriptorHeap* descriptorHeaps[] = { mCbvSrvHeap.Get() };
     mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
-    mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
-
-    // Set geometry buffers (shared across all submeshes)
+    // Устанавливаем геометрию
     mCommandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
     mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // Root parameter 0: CBV descriptor table
+    // Обновляем и биндим константы объекта
+    XMMATRIX world = XMLoadFloat4x4(&mWorld);
+    XMMATRIX worldViewProj = world * view * proj;
+    XMMATRIX worldInvTranspose = MathHelper::InverseTranspose(world);
+
+    GBufferObjectConstants objConstants;
+    XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));
+    XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
+    XMStoreFloat4x4(&objConstants.WorldInvTranspose, XMMatrixTranspose(worldInvTranspose));
+    if (mGBufferObjectCB)
+    {
+        GBufferObjectConstants objConstants;
+        XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));
+        XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
+        XMStoreFloat4x4(&objConstants.WorldInvTranspose, XMMatrixTranspose(worldInvTranspose));
+        mGBufferObjectCB->CopyData(0, objConstants);
+    }
+
+    // Root parameter 0: CBV
     mCommandList->SetGraphicsRootDescriptorTable(0,
         mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
-
-
-    // Draw each material submesh with its own texture
+    // Рисуем каждый submesh с его текстурой
     for (const auto& submesh : mMaterialSubmeshes)
     {
         int srvHeapIndex;
         if (submesh.TextureSrvIndex < 0)
-            srvHeapIndex = mDefaultTexSrvOffset; // slot 1 = white
+            srvHeapIndex = mDefaultTexSrvOffset;
         else
-            srvHeapIndex = mTextureSrvStartOffset + submesh.TextureSrvIndex; // slot 2+i
+            srvHeapIndex = mTextureSrvStartOffset + submesh.TextureSrvIndex;
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE texHandle(
             mCbvSrvHeap->GetGPUDescriptorHandleForHeapStart());
         texHandle.Offset(srvHeapIndex, mCbvSrvUavDescriptorSize);
-
         mCommandList->SetGraphicsRootDescriptorTable(1, texHandle);
 
         mCommandList->DrawIndexedInstanced(
@@ -285,9 +363,15 @@ void BoxApp::Draw(const GameTimer& gt)
             submesh.BaseVertexLocation, 0);
     }
 
-    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+    mRenderingSystem->EndGeometryPass(mCommandList.Get());
+
+    // ==================== Lighting Pass ====================
+    mRenderingSystem->ExecuteLightingPass(
+        mCommandList.Get(),
         CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+        CurrentBackBufferView(),
+        DepthStencilView()
+    );
 
     ThrowIfFailed(mCommandList->Close());
 
@@ -564,11 +648,12 @@ void BoxApp::BuildDescriptorHeaps()
 // ============================================================
 void BoxApp::BuildConstantBuffers()
 {
-    mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(md3dDevice.Get(), 1, true);
+    // ====== Создаём константный буфер для GBuffer pass ======
+    mGBufferObjectCB = std::make_unique<UploadBuffer<GBufferObjectConstants>>(
+        md3dDevice.Get(), 1, true);
 
-    UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-
-    D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
+    UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(GBufferObjectConstants));
+    D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mGBufferObjectCB->Resource()->GetGPUVirtualAddress();
 
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
     cbvDesc.BufferLocation = cbAddress;
@@ -629,31 +714,20 @@ void BoxApp::BuildRootSignature()
         IID_PPV_ARGS(&mRootSignature)));
 }
 // ============================================================
-void BoxApp::BuildShadersAndInputLayout()
+/* void BoxApp::BuildShadersAndInputLayout()
 {
-    // Проверим что файл существует
-    wchar_t fullPath[MAX_PATH];
-    GetFullPathNameW(L"..\\Shaders\\color.hlsl", MAX_PATH, fullPath, nullptr);
+    // Шейдеры теперь не нужны здесь - они в RenderingSystem
+    // Но оставим для совместимости, если нужно
 
-    char buf[512];
-    sprintf_s(buf, "Looking for shader: %ls\n", fullPath);
-    OutputDebugStringA(buf);
-
-    DWORD attribs = GetFileAttributesW(fullPath);
-    if (attribs == INVALID_FILE_ATTRIBUTES)
-        OutputDebugStringA("  SHADER FILE NOT FOUND!\n");
-    else
-        OutputDebugStringA("  Shader file exists\n");
-
-    mvsByteCode = d3dUtil::CompileShader(L"..\\Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
-    mpsByteCode = d3dUtil::CompileShader(L"..\\Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
-
-    mInputLayout =
-    {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    mInputLayout = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
-}
+}*/
 
 // ============================================================
 void BoxApp::BuildBoxGeometry()
@@ -756,6 +830,18 @@ void BoxApp::BuildBoxGeometry()
                 vert.Pos.y = attrib.vertices[3 * idx.vertex_index + 1] * 0.01f;
                 vert.Pos.z = attrib.vertices[3 * idx.vertex_index + 2] * 0.01f;
 
+                // Загружаем нормаль
+                if (idx.normal_index >= 0 && !attrib.normals.empty())
+                {
+                    vert.Normal.x = attrib.normals[3 * idx.normal_index + 0];
+                    vert.Normal.y = attrib.normals[3 * idx.normal_index + 1];
+                    vert.Normal.z = attrib.normals[3 * idx.normal_index + 2];
+                }
+                else
+                {
+                    vert.Normal = XMFLOAT3(0.0f, 1.0f, 0.0f); // Default up
+                }
+
                 if (idx.texcoord_index >= 0 && !attrib.texcoords.empty())
                 {
                     vert.Tex.x = attrib.texcoords[2 * idx.texcoord_index + 0];
@@ -826,7 +912,7 @@ void BoxApp::BuildBoxGeometry()
     }
 }
 
-// ============================================================
+/*
 void BoxApp::BuildPSO()
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc;
@@ -848,4 +934,46 @@ void BoxApp::BuildPSO()
     psoDesc.DSVFormat = mDepthStencilFormat;
 
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPSO)));
+}*/
+
+// ============================================================
+// Setup scene lights
+// ============================================================
+void BoxApp::SetupLights()
+{
+    mRenderingSystem->ClearLights();
+
+    // Directional light (солнце)
+    DirectionalLight dirLight;
+    dirLight.Direction = XMFLOAT3(0.57735f, -0.57735f, 0.57735f);
+    dirLight.Color = XMFLOAT3(1.0f, 0.95f, 0.8f);
+    dirLight.Intensity = 1.0f;
+    mRenderingSystem->AddDirectionalLight(dirLight);
+
+    // Point light 1 (красный)
+    PointLight pointLight1;
+    pointLight1.Position = XMFLOAT3(-2.0f, 1.0f, 0.0f);
+    pointLight1.Color = XMFLOAT3(1.0f, 0.3f, 0.3f);
+    pointLight1.Intensity = 2.0f;
+    pointLight1.Radius = 5.0f;
+    mRenderingSystem->AddPointLight(pointLight1);
+
+    // Point light 2 (синий)
+    PointLight pointLight2;
+    pointLight2.Position = XMFLOAT3(2.0f, 1.0f, 0.0f);
+    pointLight2.Color = XMFLOAT3(0.3f, 0.3f, 1.0f);
+    pointLight2.Intensity = 2.0f;
+    pointLight2.Radius = 5.0f;
+    mRenderingSystem->AddPointLight(pointLight2);
+
+    // Spot light (белый, направлен вниз)
+    SpotLight spotLight;
+    spotLight.Position = XMFLOAT3(0.0f, 3.0f, 0.0f);
+    spotLight.Direction = XMFLOAT3(0.0f, -1.0f, 0.0f);
+    spotLight.Color = XMFLOAT3(1.0f, 1.0f, 1.0f);
+    spotLight.Intensity = 3.0f;
+    spotLight.Radius = 10.0f;
+    spotLight.SpotAngle = cosf(XM_PI / 6.0f);
+    spotLight.InnerAngle = cosf(XM_PI / 8.0f);
+    mRenderingSystem->AddSpotLight(spotLight);
 }
