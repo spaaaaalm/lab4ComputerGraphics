@@ -30,6 +30,7 @@ struct Vertex
     XMFLOAT3 Pos;
     XMFLOAT3 Normal;
     XMFLOAT2 Tex;
+    XMFLOAT3 Tangent;
 };
 
 
@@ -713,6 +714,47 @@ void BoxApp::BuildRootSignature()
         serializedRootSig->GetBufferSize(),
         IID_PPV_ARGS(&mRootSignature)));
 }
+
+static void CalculateTangent(
+    const XMFLOAT3& pos0, const XMFLOAT2& uv0,
+    const XMFLOAT3& pos1, const XMFLOAT2& uv1,
+    const XMFLOAT3& pos2, const XMFLOAT2& uv2,
+    XMFLOAT3& outTangent)
+{
+    XMVECTOR p0 = XMLoadFloat3(&pos0);
+    XMVECTOR p1 = XMLoadFloat3(&pos1);
+    XMVECTOR p2 = XMLoadFloat3(&pos2);
+
+    XMVECTOR uv0v = XMLoadFloat2(&uv0);
+    XMVECTOR uv1v = XMLoadFloat2(&uv1);
+    XMVECTOR uv2v = XMLoadFloat2(&uv2);
+
+    XMVECTOR edge1 = p1 - p0;
+    XMVECTOR edge2 = p2 - p0;
+
+    XMVECTOR deltaUV1 = uv1v - uv0v;
+    XMVECTOR deltaUV2 = uv2v - uv0v;
+
+    float denom = deltaUV1.m128_f32[0] * deltaUV2.m128_f32[1] -
+        deltaUV2.m128_f32[0] * deltaUV1.m128_f32[1];
+
+    // === ЗАЩИТА ОТ ДЕЛЕНИЯ НА НОЛЬ ===
+    if (fabsf(denom) < 1e-6f)
+    {
+        outTangent = XMFLOAT3(1.0f, 0.0f, 0.0f); // Fallback
+        return;
+    }
+
+    float f = 1.0f / denom;
+
+    XMVECTOR tangent;
+    tangent.m128_f32[0] = f * (deltaUV2.m128_f32[1] * edge1.m128_f32[0] - deltaUV1.m128_f32[1] * edge2.m128_f32[0]);
+    tangent.m128_f32[1] = f * (deltaUV2.m128_f32[1] * edge1.m128_f32[1] - deltaUV1.m128_f32[1] * edge2.m128_f32[1]);
+    tangent.m128_f32[2] = f * (deltaUV2.m128_f32[1] * edge1.m128_f32[2] - deltaUV1.m128_f32[1] * edge2.m128_f32[2]);
+    tangent = XMVector3Normalize(tangent);
+
+    XMStoreFloat3(&outTangent, tangent);
+}
 // ============================================================
 /* void BoxApp::BuildShadersAndInputLayout()
 {
@@ -732,6 +774,8 @@ void BoxApp::BuildRootSignature()
 // ============================================================
 void BoxApp::BuildBoxGeometry()
 {
+    OutputDebugStringA("=== BuildBoxGeometry START ===\n");
+
     std::string inputfile = "sponza.obj";
     tinyobj::ObjReaderConfig reader_config;
     reader_config.triangulate = true;
@@ -748,8 +792,9 @@ void BoxApp::BuildBoxGeometry()
     auto& shapes = reader.GetShapes();
     auto& materials = reader.GetMaterials();
 
+    OutputDebugStringA("=== OBJ parsed, starting vertex build ===\n");
+
     // ---------- Group faces by material_id ----------
-    // Key: material_id, Value: list of vertex indices (3 per face)
     struct FaceData
     {
         tinyobj::index_t idx[3];
@@ -762,7 +807,6 @@ void BoxApp::BuildBoxGeometry()
         for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f)
         {
             int matId = shape.mesh.material_ids[f];
-            // triangulated, so always 3
             FaceData fd;
             fd.idx[0] = shape.mesh.indices[indexOffset + 0];
             fd.idx[1] = shape.mesh.indices[indexOffset + 1];
@@ -777,7 +821,6 @@ void BoxApp::BuildBoxGeometry()
     std::vector<std::uint32_t> indices;
     vertices.reserve(500000);
     indices.reserve(500000);
-
     mMaterialSubmeshes.clear();
 
     for (auto& pair : matFaces)
@@ -790,8 +833,6 @@ void BoxApp::BuildBoxGeometry()
         if (matId >= 0 && matId < (int)materials.size())
         {
             ms.MaterialName = materials[matId].name;
-
-            // Find texture
             std::string texPath = materials[matId].diffuse_texname;
             if (!texPath.empty())
             {
@@ -818,9 +859,16 @@ void BoxApp::BuildBoxGeometry()
         ms.StartIndexLocation = (UINT)indices.size();
         ms.BaseVertexLocation = 0;
 
+        // === ЦИКЛ ПО ГРАНЯМ — БЕЗ ВЛОЖЕННОСТИ ===
         for (size_t fi = 0; fi < faces.size(); ++fi)
         {
             const FaceData& face = faces[fi];
+
+            // Собираем 3 вершины грани
+            Vertex faceVerts[3];
+            XMFLOAT3 facePositions[3];
+            XMFLOAT2 faceUVs[3];
+
             for (int v = 0; v < 3; ++v)
             {
                 const tinyobj::index_t& idx = face.idx[v];
@@ -830,7 +878,6 @@ void BoxApp::BuildBoxGeometry()
                 vert.Pos.y = attrib.vertices[3 * idx.vertex_index + 1] * 0.01f;
                 vert.Pos.z = attrib.vertices[3 * idx.vertex_index + 2] * 0.01f;
 
-                // Загружаем нормаль
                 if (idx.normal_index >= 0 && !attrib.normals.empty())
                 {
                     vert.Normal.x = attrib.normals[3 * idx.normal_index + 0];
@@ -839,7 +886,7 @@ void BoxApp::BuildBoxGeometry()
                 }
                 else
                 {
-                    vert.Normal = XMFLOAT3(0.0f, 1.0f, 0.0f); // Default up
+                    vert.Normal = XMFLOAT3(0.0f, 1.0f, 0.0f);
                 }
 
                 if (idx.texcoord_index >= 0 && !attrib.texcoords.empty())
@@ -852,14 +899,34 @@ void BoxApp::BuildBoxGeometry()
                     vert.Tex = XMFLOAT2(0.0f, 0.0f);
                 }
 
+                faceVerts[v] = vert;
+                facePositions[v] = vert.Pos;
+                faceUVs[v] = vert.Tex;
+            }
+
+            // === Расчёт тангента ===
+            XMFLOAT3 tangent;
+            CalculateTangent(
+                facePositions[0], faceUVs[0],
+                facePositions[1], faceUVs[1],
+                facePositions[2], faceUVs[2],
+                tangent);
+
+            // === Добавляем вершины с тангентом ===
+            for (int v = 0; v < 3; ++v)
+            {
+                faceVerts[v].Tangent = tangent;
                 indices.push_back((std::uint32_t)vertices.size());
-                vertices.push_back(vert);
+                vertices.push_back(faceVerts[v]);
             }
         }
+        // === КОНЕЦ ЦИКЛА ПО ГРАНЯМ ===
 
         ms.IndexCount = (UINT)indices.size() - ms.StartIndexLocation;
         mMaterialSubmeshes.push_back(ms);
     }
+
+    OutputDebugStringA("=== Vertices built, creating GPU buffers ===\n");
 
     // ---------- Create GPU buffers ----------
     const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
@@ -889,25 +956,30 @@ void BoxApp::BuildBoxGeometry()
     mBoxGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
     mBoxGeo->IndexBufferByteSize = ibByteSize;
 
-    // Still add a "box" DrawArgs for compatibility, covers everything
     SubmeshGeometry submesh;
     submesh.IndexCount = (UINT)indices.size();
     submesh.StartIndexLocation = 0;
     submesh.BaseVertexLocation = 0;
     mBoxGeo->DrawArgs["box"] = submesh;
+
+    OutputDebugStringA("=== BuildBoxGeometry COMPLETE ===\n");
+
+    // Debug output
     char buf[256];
     sprintf_s(buf, "=== Total submeshes: %d, vertices: %d, indices: %d ===\n",
         (int)mMaterialSubmeshes.size(), (int)vertices.size(), (int)indices.size());
     OutputDebugStringA(buf);
 
-    for (size_t i = 0; i < mMaterialSubmeshes.size(); ++i)
+    if (!vertices.empty())
     {
-        sprintf_s(buf, "Submesh[%d]: mat='%s' texIdx=%d indexCount=%d startIdx=%d\n",
-            (int)i,
-            mMaterialSubmeshes[i].MaterialName.c_str(),
-            mMaterialSubmeshes[i].TextureSrvIndex,
-            mMaterialSubmeshes[i].IndexCount,
-            mMaterialSubmeshes[i].StartIndexLocation);
+        sprintf_s(buf, "=== VERIFICATION STEP 1 ===\n");
+        OutputDebugStringA(buf);
+        sprintf_s(buf, "First vertex: Pos(%.2f,%.2f,%.2f) Normal(%.2f,%.2f,%.2f) Tangent(%.2f,%.2f,%.2f)\n",
+            vertices[0].Pos.x, vertices[0].Pos.y, vertices[0].Pos.z,
+            vertices[0].Normal.x, vertices[0].Normal.y, vertices[0].Normal.z,
+            vertices[0].Tangent.x, vertices[0].Tangent.y, vertices[0].Tangent.z);
+        OutputDebugStringA(buf);
+        sprintf_s(buf, "Vertex size: %d bytes\n", (int)sizeof(Vertex));
         OutputDebugStringA(buf);
     }
 }
