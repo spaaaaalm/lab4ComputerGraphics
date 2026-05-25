@@ -1,4 +1,4 @@
-#include "../Common/d3dApp.h"
+﻿#include "../Common/d3dApp.h"
 #include "../Common/MathHelper.h"
 #include "../Common/UploadBuffer.h"
 #include "../Common/GeometryGenerator.h"
@@ -13,6 +13,7 @@
 #include <map>
 #include <array>
 #include <DirectXTex.h>
+#include <algorithm>
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "D3D12.lib")
@@ -93,6 +94,21 @@ private:
     void LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex);
 
 private:
+private:
+
+    // Система стрельбы
+    bool mSpacePressed = false;
+    float mShotCooldown = 0.0f;
+
+    struct ShotProjectile {
+        DirectX::XMFLOAT3 Position;
+        DirectX::XMFLOAT3 Direction; // Текущее вращающееся направление
+        DirectX::XMFLOAT3 BaseForward; // Исходное направление выстрела (ось вращения)
+        float LifeTime;
+        static constexpr float MaxLife = 3.0f;
+    };
+    std::vector<ShotProjectile> mProjectiles;
+
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
     FrameResource* mCurrFrameResource = nullptr;
     int mCurrFrameResourceIndex = 0;
@@ -268,7 +284,47 @@ void CrateApp::Update(const GameTimer& gt)
 
     mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
     mCurrFrameResource = mFrameResources[mCurrFrameResourceIndex].get();
+    bool spaceNow = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    if (spaceNow && !mSpacePressed && mShotCooldown <= 0.0f)
+    {
+        ShotProjectile proj;
+        proj.Position = mEyePos;
 
+        // Forward камеры в мировом пространстве
+        XMMATRIX invView = XMMatrixInverse(nullptr, XMLoadFloat4x4(&mView));
+        XMVECTOR fwd = XMVector3TransformNormal(XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), invView);
+        XMStoreFloat3(&proj.BaseForward, XMVector3Normalize(fwd));
+        proj.Direction = proj.BaseForward;
+        proj.LifeTime = 0.0f;
+
+        mProjectiles.push_back(proj);
+        mShotCooldown = 0.35f; // Скорострельность
+    }
+    mSpacePressed = spaceNow;
+    if (mShotCooldown > 0.0f) mShotCooldown -= gt.DeltaTime();
+
+    // 2. Физика и вращение снарядов
+    for (auto& p : mProjectiles)
+    {
+        p.LifeTime += gt.DeltaTime();
+        XMVECTOR pos = XMLoadFloat3(&p.Position);
+        XMVECTOR baseDir = XMLoadFloat3(&p.BaseForward);
+
+        // Движение вперёд
+        pos += baseDir * 45.0f * gt.DeltaTime();
+        XMStoreFloat3(&p.Position, pos);
+
+        // Вращение конуса света вокруг оси выстрела
+        float angle = gt.TotalTime() * 8.0f;
+        // Вектор "вправо" перпендикулярно направлению и мировому Y
+        XMVECTOR right = XMVector3Normalize(XMVector3Cross(baseDir, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)));
+        if (XMVector3LengthSq(right).m128_f32[0] < 0.001f)
+            right = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f); // Fallback если смотрим строго вверх/вниз
+
+        // Формула вращения вектора вокруг оси: V_rot = V*cos + (Right×V)*sin
+        XMVECTOR rotatedDir = baseDir * cosf(angle) + right * sinf(angle) * 0.4f; // 0.4f = ширина конуса вращения
+        XMStoreFloat3(&p.Direction, XMVector3Normalize(rotatedDir));
+    }
     if (mCurrFrameResource->Fence != 0 && mFence->GetCompletedValue() < mCurrFrameResource->Fence)
     {
         HANDLE eventHandle = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
@@ -276,12 +332,19 @@ void CrateApp::Update(const GameTimer& gt)
         WaitForSingleObject(eventHandle, INFINITE);
         CloseHandle(eventHandle);
     }
+    mProjectiles.erase(std::remove_if(mProjectiles.begin(), mProjectiles.end(),
+        [](const ShotProjectile& p) { return p.LifeTime >= ShotProjectile::MaxLife; }), mProjectiles.end());
 
+    // Жёсткий лимит шейдера: 2 спота всего. 1 занят камерой, 1 отдаём под снаряды.
+    constexpr size_t MaxActiveShots = 1;
+    if (mProjectiles.size() > MaxActiveShots)
+        mProjectiles.erase(mProjectiles.begin(), mProjectiles.end() - MaxActiveShots);
     AnimateMaterials(gt);
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
     UpdateDeferredLightCB();
+
 }
 
 void CrateApp::Draw(const GameTimer& gt)
@@ -1095,26 +1158,38 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 
 void CrateApp::UpdateDeferredLightCB()
 {
+    // Слот 1: Фонарик камеры (оставляем как было)
     XMVECTOR eyePos = XMLoadFloat3(&mEyePos);
     XMVECTOR lookAt = XMVectorZero();
     XMVECTOR viewDir = XMVector3Normalize(lookAt - eyePos);
-
     mSpotLights[1].Position = mEyePos;
     XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
 
+    // Слот 0: Активный снаряд
+    if (!mProjectiles.empty())
+    {
+        const auto& p = mProjectiles.back(); // Берём самый свежий
+        mSpotLights[0].Position = p.Position;
+        mSpotLights[0].Direction = p.Direction;
+        mSpotLights[0].Strength = { 4.0f, 4.0f, 4.0f }; // Яркий "выстрел"
+        mSpotLights[0].FalloffStart = 0.5f;
+        mSpotLights[0].FalloffEnd = 28.0f;
+        mSpotLights[0].SpotPower = 24.0f;
+    }
+    else
+    {
+        // Если снарядов нет, глушим слот
+        mSpotLights[0].Strength = { 0.0f, 0.0f, 0.0f };
+    }
+
+    // Копируем в структуру для CB
     DeferredLightConstants lightConstants = {};
     for (UINT i = 0; i < kDeferredDirectionalLightCount; ++i)
-    {
         lightConstants.DirectionalLights[i] = mDirectionalLights[i];
-    }
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
-    {
         lightConstants.PointLights[i] = mPointLights[i];
-    }
     for (UINT i = 0; i < kDeferredSpotLightCount; ++i)
-    {
         lightConstants.SpotLights[i] = mSpotLights[i];
-    }
 
     mCurrFrameResource->DeferredLightCB->CopyData(0, lightConstants);
 }
