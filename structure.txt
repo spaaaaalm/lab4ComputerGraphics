@@ -1,0 +1,265 @@
+‘âàãªâãà  ¯ ¯®ª
+‘¥à¨©­ë© ­®¬¥à â®¬ : 4C7B-2788
+C:.
+³   .gitattributes
+³   .gitignore
+³   structure.txt
+³   
+ÃÄÄÄCommon
+³       Camera.cpp
+³       Camera.h
+³       d3dApp.cpp
+³       d3dApp.h
+³       d3dUtil.cpp
+³       d3dUtil.h
+³       d3dx12.h
+³       DDSTextureLoader.cpp
+³       DDSTextureLoader.h
+³       GameTimer.cpp
+³       GameTimer.h
+³       GeometryGenerator.cpp
+³       GeometryGenerator.h
+³       MathHelper.cpp
+³       MathHelper.h
+³       UploadBuffer.h
+³       
+ÃÄÄÄCrate
+³   ³   Crate.sln
+³   ³   Crate.vcxproj
+³   ³   Crate.vcxproj.filters
+³   ³   CrateApp.cpp
+³   ³   FrameResource.cpp
+³   ³   FrameResource.h
+³   ³   GBuffer.cpp
+³   ³   GBuffer.h
+³   ³   KdTree.cpp
+³   ³   KdTree.h
+³   ³   Lights.h
+³   ³   packages.config
+³   ³   RenderingSystem.cpp
+³   ³   RenderingSystem.h
+³   ³   sponza.mtl
+³   ³   
+³   ÃÄÄÄpackages
+³   ³   ÃÄÄÄassimp-v143.5.4.3
+³   ³   ³       .signature.p7s
+³   ³   ³       LICENSE
+³   ³   ³       
+³   ³   ÃÄÄÄassimp.v140.redist.3.2
+³   ³   ³       .signature.p7s
+³   ³   ³       
+³   ³   ÀÄÄÄdirectxtex_desktop_win10.2025.10.28.1
+³   ³       ³   .signature.p7s
+³   ³       ³   
+³   ³       ÃÄÄÄdocs
+³   ³       ³       README.md
+³   ³       ³       
+³   ³       ÃÄÄÄimages
+³   ³       ³       icon.jpg
+³   ³       ³       
+³   ³       ÀÄÄÄinclude
+³   ³               DirectXTex.h
+³   ³               DirectXTex.inl
+³   ³               
+³   ÃÄÄÄShaders
+³   ³       Default.hlsl
+³   ³       DeferredGeometry.hlsl
+³   ³       DeferredLighting.hlsl
+³   ³       LightingUtil.hlsl
+³   ³       WaterTransparent.hlsl
+³   ³       
+³   ÀÄÄÄtextures
+³           background.tga
+³           background_ddn.tga
+³           chain_texture.tga
+³           chain_texture_ddn.tga
+³           lion.tga
+³           lion2_ddn.tga
+³           lion_ddn.tga
+³           spnza_bricks_a_ddn.tga
+³           spnza_bricks_a_diff.tga
+³           sponza_arch_ddn.tga
+³           sponza_arch_diff.tga
+³           sponza_ceiling_a_ddn.tga
+³           sponza_ceiling_a_diff.tga
+³           sponza_column_a_ddn.tga
+³           sponza_column_a_diff.tga
+³           sponza_column_b_ddn.tga
+³           sponza_column_b_diff.tga
+³           sponza_column_c_ddn.tga
+³           sponza_column_c_diff.tga
+³           sponza_curtain_blue_diff.tga
+³           sponza_curtain_ddn.tga
+³           sponza_curtain_diff.tga
+³           sponza_curtain_green_diff.tga
+³           sponza_details_ddn.tga
+³           sponza_details_diff.tga
+³           sponza_fabric_blue_diff.tga
+³           sponza_fabric_ddn.tga
+³           sponza_fabric_diff.tga
+³           sponza_fabric_green_diff.tga
+³           sponza_flagpole_ddn.tga
+³           sponza_flagpole_diff.tga
+³           sponza_floor_a_ddn.tga
+³           sponza_floor_a_diff.tga
+³           sponza_roof_ddn.tga
+³           sponza_roof_diff.tga
+³           sponza_thorn_ddn.tga
+³           sponza_thorn_diff.tga
+³           vase_ddn.tga
+³           vase_dif.tga
+³           vase_hanging.tga
+³           vase_hanging_ddn.tga
+³           vase_plant.tga
+³           vase_round.tga
+³           vase_round_ddn.tga
+³           
+ÃÄÄÄModels
+³   ÃÄÄÄsponza
+³   ³   ³   sponza.mtl
+³   ³   ³   
+³   ³   ÀÄÄÄtextures
+³   ³           background.tga
+³   ³           background_ddn.tga
+³   ³           chain_texture.tga
+³   ³           chain_texture_ddn.tga
+³   ³           lion.tga
+³   ³           lion2_ddn.tga
+³   ³           lion_ddn.tga
+³   ³           spnza_bricks_a_ddn.tga
+³   ³           spnza_bricks_a_diff.tga
+³   ³           sponza_arch_ddn.tga
+³   ³           sponza_arch_diff.tga
+³   ³           sponza_ceiling_a_ddn.tga
+³   ³           sponza_ceiling_a_diff.tga
+³   ³           sponza_column_a_ddn.tga
+³   ³           sponza_column_a_diff.tga
+³   ³           sponza_column_b_ddn.tga
+³   ³           sponza_column_b_diff.tga
+³   ³           sponza_column_c_ddn.tga
+³   ³           sponza_column_c_diff.tga
+³   ³           sponza_curtain_blue_diff.tga
+³   ³           sponza_curtain_ddn.tga
+³   ³           sponza_curtain_diff.tga
+³   ³           sponza_curtain_green_diff.tga
+³   ³           sponza_details_ddn.tga
+³   ³           sponza_details_diff.tga
+³   ³           sponza_fabric_blue_diff.tga
+³   ³           sponza_fabric_ddn.tga
+³   ³           sponza_fabric_diff.tga
+³   ³           sponza_fabric_green_diff.tga
+³   ³           sponza_flagpole_ddn.tga
+³   ³           sponza_flagpole_diff.tga
+³   ³           sponza_floor_a_ddn.tga
+³   ³           sponza_floor_a_diff.tga
+³   ³           sponza_roof_ddn.tga
+³   ³           sponza_roof_diff.tga
+³   ³           sponza_thorn_ddn.tga
+³   ³           sponza_thorn_diff.tga
+³   ³           vase_ddn.tga
+³   ³           vase_dif.tga
+³   ³           vase_hanging.tga
+³   ³           vase_hanging_ddn.tga
+³   ³           vase_plant.tga
+³   ³           vase_round.tga
+³   ³           vase_round_ddn.tga
+³   ³           
+³   ÀÄÄÄsponza1
+³       ³   copyright.txt
+³       ³   sponza.mtl
+³       ³   
+³       ÀÄÄÄtextures
+³               background.png
+³               background_bump.png
+³               chain_texture.png
+³               chain_texture_bump.png
+³               chain_texture_mask.png
+³               floor_gloss.png
+³               lion.png
+³               lion2_bump.png
+³               lion_bump.png
+³               spnza_bricks_a_bump.png
+³               spnza_bricks_a_diff.png
+³               spnza_bricks_a_spec.png
+³               sponza_arch_bump.png
+³               sponza_arch_diff.png
+³               sponza_arch_spec.png
+³               sponza_ceiling_a_diff.png
+³               sponza_ceiling_a_spec.png
+³               sponza_column_a_bump.png
+³               sponza_column_a_diff.png
+³               sponza_column_a_spec.png
+³               sponza_column_b_bump.png
+³               sponza_column_b_diff.png
+³               sponza_column_b_spec.png
+³               sponza_column_c_bump.png
+³               sponza_column_c_diff.png
+³               sponza_column_c_spec.png
+³               sponza_curtain_blue_diff.png
+³               sponza_curtain_diff.png
+³               sponza_curtain_green_diff.png
+³               sponza_details_diff.png
+³               sponza_details_spec.png
+³               sponza_fabric_blue_diff.png
+³               sponza_fabric_diff.png
+³               sponza_fabric_green_diff.png
+³               sponza_fabric_purple.png
+³               sponza_fabric_spec.png
+³               sponza_flagpole_diff.png
+³               sponza_flagpole_spec.png
+³               sponza_floor_a_diff.png
+³               sponza_floor_a_spec.png
+³               sponza_roof_diff.png
+³               sponza_thorn_bump.png
+³               sponza_thorn_diff.png
+³               sponza_thorn_mask.png
+³               sponza_thorn_spec.png
+³               vase_bump.png
+³               vase_dif.png
+³               vase_hanging.png
+³               vase_plant.png
+³               vase_plant_mask.png
+³               vase_plant_spec.png
+³               vase_round.png
+³               vase_round_bump.png
+³               vase_round_spec.png
+³               
+ÀÄÄÄTextures
+        bricks.dds
+        bricks2.dds
+        bricks2_nmap.dds
+        bricks3.dds
+        bricks_nmap.dds
+        checkboard.dds
+        default_nmap.dds
+        desertcube1024.dds
+        grass.dds
+        grasscube1024.dds
+        head_diff.dds
+        head_norm.dds
+        ice.dds
+        jacket_diff.dds
+        jacket_norm.dds
+        pants_diff.dds
+        pants_norm.dds
+        snowcube1024.dds
+        stone.dds
+        sunsetcube1024.dds
+        tile.dds
+        tile_nmap.dds
+        tree0.bmp
+        tree01S.dds
+        tree02S.dds
+        tree1.bmp
+        tree2.bmp
+        tree35S.dds
+        treearray.dds
+        treeArray2.dds
+        upBody_diff.dds
+        upbody_norm.dds
+        water1.dds
+        white1x1.dds
+        WireFence.dds
+        WoodCrate01.dds
+        WoodCrate02.dds
+        
