@@ -342,10 +342,10 @@ void ParticleSystem::Update(ID3D12GraphicsCommandList* cmdList, float dt, float 
 
     mMappedConstants->DeltaTime = dt;
     mMappedConstants->TotalTime = totalTime;
-    mMappedConstants->EmitRate = 400.0f;
-    mMappedConstants->Gravity = -9.8f;
-    mMappedConstants->EmitterPos = mEmitterPos;
-    mMappedConstants->MaxLife = 3.0f;
+    mMappedConstants->EmitRate = 90.0f;      
+    mMappedConstants->Gravity = 0.0f;       
+    mMappedConstants->EmitterPos = mEmitterPos; 
+    mMappedConstants->MaxLife = 4.5f;        
     mMappedConstants->ConsumeCount = mAliveCount;
     mMappedConstants->EmitCount = emitCount;
     mMappedConstants->MaxParticles = kMaxParticles;

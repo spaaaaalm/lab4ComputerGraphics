@@ -46,11 +46,30 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    p.Vel += float3(0.0f, gGravity, 0.0f) * gDeltaTime;
-    p.Pos += p.Vel * gDeltaTime;
-    p.Color.a = saturate(1.0f - p.Age / max(p.Life, 1e-4f));
+    p.Vel.y += 1.8f * gDeltaTime;
 
-    gParticlePool[idx] = p;
-    gAliveOut.Append(idx);
-    gSortList.Append(idx);
+// 2. Турбулентность (покачивание)
+float t = gTotalTime * 0.4f;
+float3 turb = float3(
+    sin(p.Pos.x * 0.8f + t) * 0.25f,
+    0.0f,
+    cos(p.Pos.z * 0.8f + t) * 0.25f
+);
+p.Vel += turb * gDeltaTime;
+
+// 3. Сопротивление среды
+p.Vel *= 0.975f;
+
+// 4. Движение
+p.Pos += p.Vel * gDeltaTime;
+
+// 5. Визуал: рост + затухание
+float lifeRatio = p.Age / p.Life;
+p.Size = lerp(0.04f, 0.45f, lifeRatio);
+p.Color.a = 1.0f - smoothstep(0.15f, 0.95f, lifeRatio);
+p.Color.rgb = lerp(float3(0.95f, 0.95f, 1.0f), float3(0.55f, 0.55f, 0.65f), lifeRatio * 0.8f);
+
+gParticlePool[idx] = p;
+gAliveOut.Append(idx);
+gSortList.Append(idx);
 }
