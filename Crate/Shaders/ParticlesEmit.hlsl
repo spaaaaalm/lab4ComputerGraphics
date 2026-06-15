@@ -15,12 +15,19 @@ cbuffer ParticleCB : register(b0)
     float gTotalTime;
     float gEmitRate;
     float gGravity;
+
     float3 gEmitterPos;
     float gMaxLife;
+
     uint gConsumeCount;
     uint gEmitCount;
     uint gMaxParticles;
-    uint gPad;
+    float gFloorY;
+
+    float gRestitution;
+    float gFloorFriction;
+    float gBounceStopVelocity;
+    float gPad;
 };
 
 RWStructuredBuffer<Particle> gParticlePool : register(u0);
@@ -28,7 +35,6 @@ AppendStructuredBuffer<uint> gAliveOut : register(u2);
 ConsumeStructuredBuffer<uint> gDeadList : register(u3);
 AppendStructuredBuffer<uint> gSortList : register(u4);
 
-// Хеш-функция для псевдослучайных чисел в шейдере
 float Hash01(uint x)
 {
     x ^= x >> 17;
@@ -50,34 +56,28 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     uint seed = i + (uint)(gTotalTime * 1000.0f) * 747796405u;
 
-    // Параметры разброса при рождении
     float angle = Hash01(seed) * 6.2831853f;
-    float radius = Hash01(seed * 3u + 11u) * 0.25f;
-    float upSpeed = lerp(0.8f, 1.4f, Hash01(seed * 7u + 23u));
+    float radius = Hash01(seed * 3u + 11u) * 0.35f;
 
-    // Позиция: эмиттер + небольшой круговой разброс
-    float3 offset = float3(cos(angle) * radius, 0.0f, sin(angle) * radius);
+    // Spawn as a fountain: particles go up first, then gravity pulls them down.
+    float upSpeed = lerp(4.0f, 7.5f, Hash01(seed * 7u + 23u));
+    float sideSpeed = lerp(1.0f, 3.5f, Hash01(seed * 19u + 41u));
+
+    float3 dirXZ = float3(cos(angle), 0.0f, sin(angle));
+    float3 offset = dirXZ * radius;
 
     Particle p;
     p.Pos = gEmitterPos + offset;
+    p.Vel = dirXZ * sideSpeed;
+    p.Vel.y = upSpeed;
 
-    // Скорость: вверх + лёгкий горизонтальный шум
-    p.Vel = float3(
-        (Hash01(seed * 13u) - 0.5f) * 0.3f,
-        upSpeed,
-        (Hash01(seed * 17u) - 0.5f) * 0.3f
-    );
-
-    // Время жизни (минимум 1.5 сек, чтобы не исчезали мгновенно)
     p.Age = 0.0f;
-    p.Life = max(gMaxLife * lerp(0.8f, 1.2f, Hash01(seed * 23u)), 1.5f);
-    
-    // Начальный цвет и размер
+    p.Life = max(gMaxLife * lerp(0.75f, 1.25f, Hash01(seed * 23u)), 1.5f);
+
     p.Color = float4(0.92f, 0.92f, 0.98f, 1.0f);
     p.Size = 0.04f;
     p.Pad = 0.0f;
 
-    // Берём индекс из мёртвого списка и инициализируем
     uint particleIndex = gDeadList.Consume();
     gParticlePool[particleIndex] = p;
     gAliveOut.Append(particleIndex);

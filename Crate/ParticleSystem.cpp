@@ -10,7 +10,7 @@ namespace
 constexpr UINT kRenderSrvTable = 0;   // [pool SRV, sort SRV]
 constexpr UINT kUavTableAB = 2;       // [pool, aliveA, aliveB]
 constexpr UINT kUavTableBA = 5;       // [pool, aliveB, aliveA]
-constexpr UINT kUavDeadSort = 7;      // [dead, sort]
+constexpr UINT kUavDeadSort = 8;      // [dead, sort]
 }
 
 void ParticleSystem::Initialize(
@@ -239,8 +239,6 @@ void ParticleSystem::BuildBuffersAndDescriptors(ID3D12GraphicsCommandList* cmdLi
     poolUav.Buffer.StructureByteStride = particleStride;
     poolUav.Buffer.CounterOffsetInBytes = 0;
     poolUav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-    hCpu.Offset(1, mDescriptorSize);
-    mDevice->CreateUnorderedAccessView(mParticlePool.Get(), nullptr, &poolUav, hCpu);
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC idxUav = {};
     idxUav.Format = DXGI_FORMAT_UNKNOWN;
@@ -250,16 +248,43 @@ void ParticleSystem::BuildBuffersAndDescriptors(ID3D12GraphicsCommandList* cmdLi
     idxUav.Buffer.StructureByteStride = sizeof(UINT);
     idxUav.Buffer.CounterOffsetInBytes = 0;
     idxUav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+    // Descriptor layout from mDescriptorStartIndex:
+    // 0: particle pool SRV
+    // 1: sort/alive render list SRV
+    // 2: particle pool UAV, 3: alive A input, 4: alive B output  -> AB table
+    // 5: particle pool UAV, 6: alive B input, 7: alive A output  -> BA table
+    // 8: dead list UAV, 9: sort/render list UAV                  -> aux table
+
+    // index 2: pool UAV for AB table.
+    hCpu.Offset(1, mDescriptorSize);
+    mDevice->CreateUnorderedAccessView(mParticlePool.Get(), nullptr, &poolUav, hCpu);
+
+    // index 3: alive A.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListA.Get(), mAliveCounterA.Get(), &idxUav, hCpu);
+
+    // index 4: alive B.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListB.Get(), mAliveCounterB.Get(), &idxUav, hCpu);
+
+    // index 5: duplicate pool UAV for BA table.
+    hCpu.Offset(1, mDescriptorSize);
+    mDevice->CreateUnorderedAccessView(mParticlePool.Get(), nullptr, &poolUav, hCpu);
+
+    // index 6: alive B.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListB.Get(), mAliveCounterB.Get(), &idxUav, hCpu);
+
+    // index 7: alive A.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListA.Get(), mAliveCounterA.Get(), &idxUav, hCpu);
+
+    // index 8: dead list.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mDeadList.Get(), mDeadCounter.Get(), &idxUav, hCpu);
+
+    // index 9: sort/render list.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mSortList.Get(), mSortCounter.Get(), &idxUav, hCpu);
 
@@ -330,75 +355,139 @@ void ParticleSystem::Update(ID3D12GraphicsCommandList* cmdList, float dt, float 
     if (!cmdList || !mResourcesPrimed)
         return;
 
+    // Readback is from the previous GPU frame. It is enough for throttling spawn count.
     mAliveCount = (std::min)(*mMappedAliveCount, kMaxParticles);
     const UINT freeSlots = kMaxParticles - mAliveCount;
 
-    mEmitAccumulator += dt * 260.0f;
+    // Real spawn rate. gEmitRate in the shader is only informational for now.
+    constexpr float kEmitRate = 1200.0f;
+    mEmitAccumulator += dt * kEmitRate;
+
     UINT emitCount = static_cast<UINT>(mEmitAccumulator);
     mEmitAccumulator -= static_cast<float>(emitCount);
     emitCount = (std::min)(emitCount, freeSlots);
 
+    // Reset the output alive list counter and render/sort list counter for this frame.
     ResetAliveAndSortCounters(cmdList);
 
     mMappedConstants->DeltaTime = dt;
     mMappedConstants->TotalTime = totalTime;
-    mMappedConstants->EmitRate = 90.0f;      
-    mMappedConstants->Gravity = 0.0f;       
-    mMappedConstants->EmitterPos = mEmitterPos; 
-    mMappedConstants->MaxLife = 4.5f;        
+    mMappedConstants->EmitRate = kEmitRate;
+    mMappedConstants->Gravity = -9.8f;
+    mMappedConstants->EmitterPos = mEmitterPos;
+    mMappedConstants->MaxLife = 5.5f;
     mMappedConstants->ConsumeCount = mAliveCount;
     mMappedConstants->EmitCount = emitCount;
     mMappedConstants->MaxParticles = kMaxParticles;
+    mMappedConstants->FloorY = -1.0f;
+    mMappedConstants->Restitution = 0.65f;
+    mMappedConstants->FloorFriction = 0.82f;
+    mMappedConstants->BounceStopVelocity = 0.25f;
+    mMappedConstants->Padding = 0.0f;
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE uavMain(mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
-        mDescriptorStartIndex + (mCurrentIsA ? kUavTableAB : kUavTableBA), mDescriptorSize);
-    CD3DX12_GPU_DESCRIPTOR_HANDLE uavAux(mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
-        mDescriptorStartIndex + kUavDeadSort, mDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE uavMain(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        mDescriptorStartIndex + (mCurrentIsA ? kUavTableAB : kUavTableBA),
+        mDescriptorSize);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE uavAux(
+        mSrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        mDescriptorStartIndex + kUavDeadSort,
+        mDescriptorSize);
 
     cmdList->SetComputeRootSignature(mComputeRootSignature.Get());
     cmdList->SetComputeRootConstantBufferView(0, mParticleConstants->GetGPUVirtualAddress());
     cmdList->SetComputeRootDescriptorTable(1, uavMain);
     cmdList->SetComputeRootDescriptorTable(2, uavAux);
 
+    // 1) Emit new particles into AliveOut and SortList.
+    // Newly emitted particles will be simulated starting from the next frame.
     if (emitCount > 0)
     {
         cmdList->SetPipelineState(mEmitPSO.Get());
         const UINT groups = (emitCount + kThreadGroupSize - 1) / kThreadGroupSize;
         cmdList->Dispatch((std::max)(groups, 1u), 1, 1);
+
         auto uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
         cmdList->ResourceBarrier(1, &uavBarrier);
     }
 
+    // 2) Simulate all particles from AliveIn and append survivors to AliveOut and SortList.
     if (mAliveCount > 0)
     {
         cmdList->SetPipelineState(mSimulatePSO.Get());
         const UINT groups = (mAliveCount + kThreadGroupSize - 1) / kThreadGroupSize;
         cmdList->Dispatch((std::max)(groups, 1u), 1, 1);
+
         auto uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
         cmdList->ResourceBarrier(1, &uavBarrier);
     }
 
+    // 3) Read back alive count for the next frame's CPU-side throttling.
     ID3D12Resource* outAliveCounter = mCurrentIsA ? mAliveCounterB.Get() : mAliveCounterA.Get();
-    auto aliveToCopy = CD3DX12_RESOURCE_BARRIER::Transition(outAliveCounter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    auto aliveToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+        outAliveCounter,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
     cmdList->ResourceBarrier(1, &aliveToCopy);
+
     cmdList->CopyBufferRegion(mAliveCountReadback.Get(), 0, outAliveCounter, 0, sizeof(UINT));
-    auto aliveToUav = CD3DX12_RESOURCE_BARRIER::Transition(outAliveCounter, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    auto aliveToUav = CD3DX12_RESOURCE_BARRIER::Transition(
+        outAliveCounter,
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmdList->ResourceBarrier(1, &aliveToUav);
 
+    // 4) Build indirect draw arguments.
+    // InstanceCount comes from mSortCounter, so mSortCounter must be COPY_SOURCE here.
     mMappedIndirectArgs->VertexCountPerInstance = 1;
     mMappedIndirectArgs->InstanceCount = 0;
     mMappedIndirectArgs->StartVertexLocation = 0;
     mMappedIndirectArgs->StartInstanceLocation = 0;
-    auto argsToCopy = CD3DX12_RESOURCE_BARRIER::Transition(mIndirectArgs.Get(),
-        D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmdList->ResourceBarrier(1, &argsToCopy);
-    cmdList->CopyBufferRegion(mIndirectArgs.Get(), 0, mIndirectArgsUpload.Get(), 0, sizeof(D3D12_DRAW_ARGUMENTS));
-    cmdList->CopyBufferRegion(mIndirectArgs.Get(), static_cast<UINT>(offsetof(D3D12_DRAW_ARGUMENTS, InstanceCount)),
-        mSortCounter.Get(), 0, sizeof(UINT));
-    auto argsToIndirect = CD3DX12_RESOURCE_BARRIER::Transition(mIndirectArgs.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-    cmdList->ResourceBarrier(1, &argsToIndirect);
 
+    auto argsToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+        mIndirectArgs.Get(),
+        D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+
+    auto sortCounterToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+        mSortCounter.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    D3D12_RESOURCE_BARRIER toCopyBarriers[] = { argsToCopy, sortCounterToCopy };
+    cmdList->ResourceBarrier(_countof(toCopyBarriers), toCopyBarriers);
+
+    cmdList->CopyBufferRegion(
+        mIndirectArgs.Get(),
+        0,
+        mIndirectArgsUpload.Get(),
+        0,
+        sizeof(D3D12_DRAW_ARGUMENTS));
+
+    cmdList->CopyBufferRegion(
+        mIndirectArgs.Get(),
+        static_cast<UINT>(offsetof(D3D12_DRAW_ARGUMENTS, InstanceCount)),
+        mSortCounter.Get(),
+        0,
+        sizeof(UINT));
+
+    auto argsToIndirect = CD3DX12_RESOURCE_BARRIER::Transition(
+        mIndirectArgs.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+    auto sortCounterToUav = CD3DX12_RESOURCE_BARRIER::Transition(
+        mSortCounter.Get(),
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    D3D12_RESOURCE_BARRIER backBarriers[] = { argsToIndirect, sortCounterToUav };
+    cmdList->ResourceBarrier(_countof(backBarriers), backBarriers);
+
+    // AliveOut becomes AliveIn for the next frame.
     SwapBuffers();
 }
 

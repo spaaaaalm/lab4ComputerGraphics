@@ -15,12 +15,19 @@ cbuffer ParticleCB : register(b0)
     float gTotalTime;
     float gEmitRate;
     float gGravity;
+
     float3 gEmitterPos;
     float gMaxLife;
+
     uint gConsumeCount;
     uint gEmitCount;
     uint gMaxParticles;
-    uint gPad;
+    float gFloorY;
+
+    float gRestitution;
+    float gFloorFriction;
+    float gBounceStopVelocity;
+    float gPad;
 };
 
 RWStructuredBuffer<Particle> gParticlePool : register(u0);
@@ -46,30 +53,48 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    p.Vel.y += 1.8f * gDeltaTime;
+    float lifeRatio = saturate(p.Age / p.Life);
 
-// 2. Турбулентность (покачивание)
-float t = gTotalTime * 0.4f;
-float3 turb = float3(
-    sin(p.Pos.x * 0.8f + t) * 0.25f,
-    0.0f,
-    cos(p.Pos.z * 0.8f + t) * 0.25f
-);
-p.Vel += turb * gDeltaTime;
+    // Visuals.
+    p.Size = lerp(0.04f, 0.45f, lifeRatio);
+    p.Color.a = 1.0f - smoothstep(0.15f, 0.95f, lifeRatio);
+    p.Color.rgb = lerp(
+        float3(0.95f, 0.95f, 1.0f),
+        float3(0.55f, 0.55f, 0.65f),
+        lifeRatio * 0.8f);
 
-// 3. Сопротивление среды
-p.Vel *= 0.975f;
+    // Physics.
+    p.Vel.y += gGravity * gDeltaTime;
 
-// 4. Движение
-p.Pos += p.Vel * gDeltaTime;
+    float t = gTotalTime * 0.4f;
+    float3 turb = float3(
+        sin(p.Pos.x * 0.8f + t) * 0.25f,
+        0.0f,
+        cos(p.Pos.z * 0.8f + t) * 0.25f);
+    p.Vel += turb * gDeltaTime;
 
-// 5. Визуал: рост + затухание
-float lifeRatio = p.Age / p.Life;
-p.Size = lerp(0.04f, 0.45f, lifeRatio);
-p.Color.a = 1.0f - smoothstep(0.15f, 0.95f, lifeRatio);
-p.Color.rgb = lerp(float3(0.95f, 0.95f, 1.0f), float3(0.55f, 0.55f, 0.65f), lifeRatio * 0.8f);
+    // Frame-rate independent damping. 0.975 is old per-60-FPS-frame damping.
+    p.Vel *= pow(0.975f, gDeltaTime * 60.0f);
 
-gParticlePool[idx] = p;
-gAliveOut.Append(idx);
-gSortList.Append(idx);
+    p.Pos += p.Vel * gDeltaTime;
+
+    // Floor collision. Size is used as approximate particle radius.
+    float radius = p.Size;
+    if (p.Pos.y - radius < gFloorY)
+    {
+        p.Pos.y = gFloorY + radius;
+
+        if (p.Vel.y < 0.0f)
+        {
+            p.Vel.y = -p.Vel.y * gRestitution;
+            p.Vel.xz *= gFloorFriction;
+
+            if (abs(p.Vel.y) < gBounceStopVelocity)
+                p.Vel.y = 0.0f;
+        }
+    }
+
+    gParticlePool[idx] = p;
+    gAliveOut.Append(idx);
+    gSortList.Append(idx);
 }
