@@ -6,6 +6,7 @@
 #include "../Common/GeometryGenerator.h"
 #include "Lights.h"
 #include "RenderingSystem.h"
+#include "ShadowSystem.h"
 #include "KdTree.h"
 #include "ParticleSystem.h"
 #include <DirectXCollision.h>
@@ -31,6 +32,21 @@ using namespace DirectX;
 
 namespace
 {
+struct BillboardVertex
+{
+    XMFLOAT3 Pos;
+    XMFLOAT2 TexC;
+};
+
+struct TreeInstanceGpu
+{
+    XMFLOAT3 WorldPos;
+    float Pad;
+};
+
+constexpr float kForestPatchHalfExtent = 24.0f;
+constexpr float kForestPatchCenterX = 0.0f;
+constexpr float kForestPatchCenterZ = -63.0f;
 
 bool FileExistsA_Local(const char* p)
 {
@@ -148,20 +164,31 @@ private:
     void UpdateObjectCBs(const GameTimer& gt);
     void UpdateMaterialCBs(const GameTimer& gt);
     void UpdateMainPassCB(const GameTimer& gt);
+    void UpdatePostProcessCB();
     void UpdateDeferredLightCB();
 
     void LoadTextures();
+    void LoadBillboardTreeTexture();
     void BuildRootSignature();
     void BuildDescriptorHeaps();
     void BuildShadersAndInputLayout();
     void LoadOBJModels();
+    void LoadTreeLodMesh();
     void BuildPSOs();
     void BuildFrameResources();
     void BuildMaterials();
     void BuildRenderItems();
-    void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
+    void ComputeSponzaWorldBounds();
+    void DrawRenderItems(
+        ID3D12GraphicsCommandList* cmdList,
+        const std::vector<RenderItem*>& ritems,
+        size_t maxCount = SIZE_MAX);
+    void DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
+    void CreateBillboardForest();
+    void UpdateForestLod();
+    void DrawBillboardForest(ID3D12GraphicsCommandList* cmdList);
     void BuildStressTestObjects(int& objIndex);
     void UpdateStressVisibility();
 
@@ -187,10 +214,14 @@ private:
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
     std::unique_ptr<RenderingSystem> mRenderingSystem;
+    std::unique_ptr<ShadowSystem> mShadowSystem;
     std::unique_ptr<ParticleSystem> mParticleSystem;
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
     std::vector<RenderItem*> mSponzaOpaqueRitems;
+    bool mHasSponzaBounds = false;
+    XMFLOAT3 mSponzaBoundsMin = {};
+    XMFLOAT3 mSponzaBoundsMax = {};
     std::vector<RenderItem*> mStressRitems;
     std::vector<DirectX::BoundingBox> mStressWorldBounds;
     std::vector<RenderItem*> mStressVisibleRitems;
@@ -239,8 +270,33 @@ private:
 
     bool mGeometryWireframe = false;
     bool mF3KeyDown = false;
+    bool mEdgePostEnabled = true;
+    bool mVcrPostEnabled = true;
+    bool mF6KeyDown = false;
+    bool mF7KeyDown = false;
 
+    std::vector<TreeInstanceGpu> mForestInstancesCpu;
+    ComPtr<ID3D12Resource> mForestMeshUpload;
+    ComPtr<ID3D12Resource> mForestBillboardUpload;
+    BYTE* mForestMeshMapped = nullptr;
+    BYTE* mForestBillboardMapped = nullptr;
+    UINT mForestMeshCount = 0;
+    UINT mForestBillboardCount = 0;
+    bool mTreeLodMeshLoaded = false;
+    UINT mGpuFrameIndex = 0;
+    UINT mTreeMtlDiffuseSrvHeapIndex = 0;
+    UINT mBillboardForestInstanceCount = 0;
+    UINT mBillboardObjectCbIndex = 0;
+    UINT mBillboardTreeSrvHeapIndex = 0;
+    static constexpr UINT kMaxForestInstances = 512;
+    static constexpr size_t kMaxStressDrawsPerFrame = 200u;
+    static constexpr UINT kMaxPointLightsForShading = 256u;
+    static constexpr float kForestLodMeshDistance = 26.0f;
+    static constexpr UINT kTreeInstanceMeshSrvHeapIndex = 240;
+    static constexpr UINT kTreeInstanceBillboardSrvHeapIndex = 241;
     static constexpr UINT kParticleSrvHeapStartIndex = 244;
+    static constexpr UINT kShadowSrvHeapStartIndex = 500;
+    static constexpr UINT kSrvDescriptorHeapSize = 512;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -258,7 +314,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     }
     catch (DxException& e)
     {
-        MessageBox(nullptr, e.ToString().c_str(), L"HR Failed", MB_OK);
+        std::wstring msg = e.ToString();
+        if (D3DApp* app = D3DApp::GetApp())
+        {
+            const HRESULT removed = app->GetDeviceRemovedReason();
+            if (FAILED(removed))
+            {
+                wchar_t removedMsg[96];
+                swprintf_s(removedMsg, L"\nGetDeviceRemovedReason: 0x%08X", static_cast<unsigned>(removed));
+                msg += removedMsg;
+            }
+        }
+        MessageBox(nullptr, msg.c_str(), L"HR Failed", MB_OK);
         return 0;
     }
 }
@@ -271,7 +338,8 @@ CrateApp::CrateApp(HINSTANCE hInstance)
     mPhi = 0.4f * XM_PI;
     mRadius = 8.0f;
 
-    mDirectionalLights[0].Direction = { 0.45f, -0.72f, 0.52f };
+    // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
+    mDirectionalLights[0].Direction = { 0.25f, -0.90f, 0.35f };
     mDirectionalLights[0].Strength = { 0.20f, 0.35f, 1.40f };
 
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
@@ -293,7 +361,7 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     mSpotLights[1].Position = { 0.0f, 0.0f, 0.0f };
     mSpotLights[1].Direction = { 0.0f, -0.4f, 1.0f };
-    mSpotLights[1].Strength = { 3.6f, 0.28f, 0.28f };
+    mSpotLights[1].Strength = { 1.0f, 0.0f, 0.0f };
     mSpotLights[1].FalloffStart = 1.5f;
     mSpotLights[1].FalloffEnd = 70.0f;
     mSpotLights[1].SpotPower = 96.0f;
@@ -310,11 +378,13 @@ std::wstring CrateApp::GetFrameStatsExtra() const
     wchar_t buf[320];
     swprintf_s(
         buf,
-        L"   stress draw: %zu / %zu   F4 cull:%s F5 kd:%s",
+        L"   stress draw: %zu / %zu   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s",
         mStressVisibleRitems.size(),
         mStressRitems.size(),
         mFrustumCullEnabled ? L"on" : L"off",
-        mKdTreeCullingEnabled ? L"on" : L"off");
+        mKdTreeCullingEnabled ? L"on" : L"off",
+        mEdgePostEnabled ? L"on" : L"off",
+        mVcrPostEnabled ? L"on" : L"off");
     return buf;
 }
 
@@ -330,8 +400,11 @@ bool CrateApp::Initialize()
     LoadTextures();
     BuildDescriptorHeaps();
     LoadOBJModels();
+    LoadTreeLodMesh();
+    LoadBillboardTreeTexture();
     CreateWaterPlaneGeometry();
     CreateBoxGeometry();
+    CreateBillboardForest();
     BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
@@ -345,6 +418,17 @@ bool CrateApp::Initialize()
         mDepthStencilFormat,
         m4xMsaaState,
         m4xMsaaQuality);
+
+    mShadowSystem = std::make_unique<ShadowSystem>();
+    mShadowSystem->Initialize(
+        md3dDevice.Get(),
+        mSrvDescriptorHeap.Get(),
+        kShadowSrvHeapStartIndex,
+        mCbvSrvDescriptorSize);
+    mRenderingSystem->SetLightingResources(
+        mShadowSystem->GetShadowMapResource(),
+        ShadowSystem::kCascadeCount,
+        mTextures["checkerTex"]->Resource.Get());
 
     mParticleSystem = std::make_unique<ParticleSystem>();
     mParticleSystem->Initialize(
@@ -379,6 +463,7 @@ void CrateApp::OnResize()
 void CrateApp::Update(const GameTimer& gt)
 {
     UpdateCamera(gt);
+    UpdateForestLod();
 
     mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
     mCurrFrameResource = mFrameResources[mCurrFrameResourceIndex].get();
@@ -395,6 +480,42 @@ void CrateApp::Update(const GameTimer& gt)
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
+
+    const SHORT f6State = GetAsyncKeyState(VK_F6);
+    if ((f6State & 0x8000) != 0)
+    {
+        if (!mF6KeyDown)
+        {
+            mEdgePostEnabled = !mEdgePostEnabled;
+            mF6KeyDown = true;
+            char buf[96];
+            sprintf_s(buf, "Edge post-process: %s\n", mEdgePostEnabled ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF6KeyDown = false;
+    }
+
+    const SHORT f7State = GetAsyncKeyState(VK_F7);
+    if ((f7State & 0x8000) != 0)
+    {
+        if (!mF7KeyDown)
+        {
+            mVcrPostEnabled = !mVcrPostEnabled;
+            mF7KeyDown = true;
+            char buf[96];
+            sprintf_s(buf, "VCR post-process: %s\n", mVcrPostEnabled ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF7KeyDown = false;
+    }
+
+    UpdatePostProcessCB();
 
     const SHORT f3State = GetAsyncKeyState(VK_F3);
     if ((f3State & 0x8000) != 0)
@@ -449,20 +570,30 @@ void CrateApp::Update(const GameTimer& gt)
     {
         mFallingActive[0] = true;
         mFallingVelY[0] = 0.0f;
-        mPointLights[0].Position = { 6.0f, 20.0f, 0.0f };
+        mPointLights[0].Position = { 0.0f, 12.0f, 0.0f };
     }
 
     mSpawnAccumulator += gt.DeltaTime();
-    while (mSpawnAccumulator >= 1.0f)
+    const float spawnInterval = 1.0f;
+    while (mSpawnAccumulator >= spawnInterval)
     {
-        mSpawnAccumulator -= 1.0f;
+        mSpawnAccumulator -= spawnInterval;
+        UINT activeCount = 0;
+        for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+        {
+            if (mFallingActive[i])
+                ++activeCount;
+        }
+        if (activeCount >= kMaxPointLightsForShading)
+            break;
+
         for (UINT i = 0; i < kDeferredPointLightCount; ++i)
         {
             if (!mFallingActive[i])
             {
                 mFallingActive[i] = true;
                 mFallingVelY[i] = 0.0f;
-                mPointLights[i].Position = { 6.0f, 20.0f, 0.0f };
+                mPointLights[i].Position = { 0.0f, 12.0f, 0.0f };
                 break;
             }
         }
@@ -508,12 +639,50 @@ void CrateApp::Draw(const GameTimer& gt)
     auto passCB = mCurrFrameResource->PassCB->Resource();
     auto passAddress = passCB->GetGPUVirtualAddress();
 
+    if (mShadowSystem)
+    {
+        const XMMATRIX view = XMLoadFloat4x4(&mView);
+        const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+        const XMVECTOR lightDir = XMLoadFloat3(&mDirectionalLights[0].Direction);
+        if (mHasSponzaBounds)
+        {
+            mShadowSystem->SetSceneBounds(
+                XMLoadFloat3(&mSponzaBoundsMin),
+                XMLoadFloat3(&mSponzaBoundsMax));
+        }
+
+        mShadowSystem->UpdateCascades(
+            view, proj, lightDir, 1.0f, 1000.0f, ShadowSystem::kDefaultSplitLambda);
+
+        mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
+        for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
+        {
+            mShadowSystem->BeginCascade(mCommandList.Get(), c);
+            DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
+        }
+        mShadowSystem->EndPass(mCommandList.Get());
+
+        mShadowSystem->UpdateLightingConstants(lightDir);
+        mCommandList->RSSetViewports(1, &mScreenViewport);
+        mCommandList->RSSetScissorRects(1, &mScissorRect);
+    }
+
+    mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+
     CD3DX12_GPU_DESCRIPTOR_HANDLE checkerTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
     checkerTex.Offset(1, mCbvSrvDescriptorSize);
-    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex, mGeometryWireframe);
+    mRenderingSystem->BeginGeometryPass(
+        mCommandList.Get(),
+        DepthStencilView(),
+        passAddress,
+        checkerTex,
+        mGeometryWireframe);
 
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
-    DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
+    if (!mStressVisibleRitems.empty())
+        DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
+    DrawBillboardForest(mCommandList.Get());
+
     if (mParticleSystem)
     {
         mParticleSystem->SetEmitterPosition(XMFLOAT3(0.0f, 1.2f, 0.0f));
@@ -522,6 +691,9 @@ void CrateApp::Draw(const GameTimer& gt)
     }
 
     mRenderingSystem->EndGeometryPass(mCommandList.Get());
+
+    if (mShadowSystem)
+        mShadowSystem->PrepareForLighting(mCommandList.Get());
 
     auto transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -533,6 +705,7 @@ void CrateApp::Draw(const GameTimer& gt)
         CurrentBackBufferView(),
         passAddress,
         mCurrFrameResource->DeferredLightParamsCB->Resource()->GetGPUVirtualAddress(),
+        mShadowSystem ? mShadowSystem->GetLightingConstantBufferAddress() : 0,
         mCurrFrameResource->DeferredLightBuffer->Resource(),
         kDeferredTotalLightCount,
         sizeof(DeferredLightGpu));
@@ -549,6 +722,18 @@ void CrateApp::Draw(const GameTimer& gt)
             passAddress,
             mGeometryWireframe);
         DrawRenderItems(mCommandList.Get(), mWaterRitems);
+    }
+
+    if (mEdgePostEnabled || mVcrPostEnabled)
+    {
+        mRenderingSystem->ExecutePostProcessPasses(
+            mCommandList.Get(),
+            CurrentBackBuffer(),
+            CurrentBackBufferView(),
+            passAddress,
+            mCurrFrameResource->PostProcessCB->Resource()->GetGPUVirtualAddress(),
+            mEdgePostEnabled,
+            mVcrPostEnabled);
     }
 
     transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -612,6 +797,109 @@ void CrateApp::CreateBoxGeometry()
     geo->DrawArgs["box"] = submesh;
 
     mGeometries[geo->Name] = std::move(geo);
+}
+
+void CrateApp::CreateBillboardForest()
+{
+    std::vector<BillboardVertex> verts = {
+        { { -0.5f, 0.0f, 0.0f }, { 0.0f, 1.0f } },
+        { { 0.5f, 0.0f, 0.0f }, { 1.0f, 1.0f } },
+        { { 0.5f, 1.0f, 0.0f }, { 1.0f, 0.0f } },
+        { { -0.5f, 1.0f, 0.0f }, { 0.0f, 0.0f } },
+    };
+    const std::vector<std::uint32_t> indices = { 0, 1, 2, 0, 2, 3 };
+
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = "BillboardQuad";
+
+    const UINT vbByteSize = (UINT)(verts.size() * sizeof(BillboardVertex));
+    const UINT ibByteSize = (UINT)(indices.size() * sizeof(std::uint32_t));
+
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+    CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), verts.data(), vbByteSize);
+
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+    CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), verts.data(), vbByteSize, geo->VertexBufferUploader);
+
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(BillboardVertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry submesh;
+    submesh.IndexCount = (UINT)indices.size();
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+    geo->DrawArgs["tree"] = submesh;
+
+    mGeometries[geo->Name] = std::move(geo);
+
+    mForestInstancesCpu.reserve(kMaxForestInstances);
+    std::mt19937 rng(99901u);
+    std::uniform_real_distribution<float> distX(
+        kForestPatchCenterX - kForestPatchHalfExtent,
+        kForestPatchCenterX + kForestPatchHalfExtent);
+    std::uniform_real_distribution<float> distZ(
+        kForestPatchCenterZ - kForestPatchHalfExtent,
+        kForestPatchCenterZ + kForestPatchHalfExtent);
+    while (mForestInstancesCpu.size() < kMaxForestInstances)
+    {
+        const float x = distX(rng);
+        const float z = distZ(rng);
+        TreeInstanceGpu t{};
+        t.WorldPos = XMFLOAT3(x, -1.0f, z);
+        t.Pad = 0.0f;
+        mForestInstancesCpu.push_back(t);
+    }
+
+    mBillboardForestInstanceCount = (UINT)mForestInstancesCpu.size();
+    const UINT instBufBytes = kMaxForestInstances * (UINT)sizeof(TreeInstanceGpu);
+
+    auto uploadHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+    auto bufDesc = CD3DX12_RESOURCE_DESC::Buffer(instBufBytes);
+
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &bufDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&mForestMeshUpload)));
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &bufDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&mForestBillboardUpload)));
+
+    ThrowIfFailed(mForestMeshUpload->Map(0, nullptr, reinterpret_cast<void**>(&mForestMeshMapped)));
+    ThrowIfFailed(mForestBillboardUpload->Map(0, nullptr, reinterpret_cast<void**>(&mForestBillboardMapped)));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Buffer.FirstElement = 0;
+    srvDesc.Buffer.NumElements = kMaxForestInstances;
+    srvDesc.Buffer.StructureByteStride = sizeof(TreeInstanceGpu);
+    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE hMesh(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+    hMesh.Offset(kTreeInstanceMeshSrvHeapIndex, mCbvSrvDescriptorSize);
+    md3dDevice->CreateShaderResourceView(mForestMeshUpload.Get(), &srvDesc, hMesh);
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE hBill(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+    hBill.Offset(kTreeInstanceBillboardSrvHeapIndex, mCbvSrvDescriptorSize);
+    md3dDevice->CreateShaderResourceView(mForestBillboardUpload.Get(), &srvDesc, hBill);
+
+    OutputDebugStringA("Billboard forest geometry + instances created\n");
 }
 
 void CrateApp::CreateWaterPlaneGeometry()
@@ -795,6 +1083,56 @@ void CrateApp::LoadModelTexture(const std::string& texturePath, const std::strin
     mTextures[modelTex->Name] = std::move(modelTex);
 }
 
+void CrateApp::LoadBillboardTreeTexture()
+{
+    mBillboardTreeSrvHeapIndex = 0;
+
+    int nextHeap = 2;
+    for (const auto& kv : mTextureCache)
+        nextHeap = (std::max)(nextHeap, kv.second + 1);
+    nextHeap = (std::max)(nextHeap, (int)kTreeInstanceBillboardSrvHeapIndex + 1);
+
+    static const char* kTexNames[] = {
+        "tree.dds",
+        "tree.png",
+        "tree.tga",
+        "tree.jpg",
+        "tree.jpeg",
+    };
+    static const char* kTexDirs[] = {
+        "../Textures/",
+        "Textures/",
+        "../../Textures/",
+        "../../../Textures/",
+    };
+
+    for (const char* dir : kTexDirs)
+    {
+        for (const char* name : kTexNames)
+        {
+            const std::string path = std::string(dir) + name;
+            const std::string resolved = ResolveMediaPath(path);
+            if (!FileExistsA_Local(resolved.c_str()))
+                continue;
+
+            mTextures.erase("treeTex");
+            LoadModelTexture(resolved, "treeTex", nextHeap);
+
+            auto it = mTextures.find("treeTex");
+            if (it != mTextures.end() && it->second && it->second->Resource)
+            {
+                mBillboardTreeSrvHeapIndex = static_cast<UINT>(nextHeap);
+                char msg[384];
+                sprintf_s(msg, "Billboard: tree texture OK: %s (heap %u)\n", resolved.c_str(), mBillboardTreeSrvHeapIndex);
+                OutputDebugStringA(msg);
+                return;
+            }
+        }
+    }
+
+    OutputDebugStringA(
+        "Billboard: tree texture not found (place tree.png|dds|... under Textures/ next to exe or ../Textures/). Using wood.\n");
+}
 
 void CrateApp::LoadOBJModels()
 {
@@ -1017,6 +1355,240 @@ void CrateApp::LoadOBJModels()
     OutputDebugStringA("========================================\n\n");
 }
 
+void CrateApp::LoadTreeLodMesh()
+{
+    mTreeLodMeshLoaded = false;
+    mTreeMtlDiffuseSrvHeapIndex = 0;
+
+    const char* tryPaths[] = {
+        "../Models/tree-branched/tree-branched.obj",
+        "../Models/tree-branched.obj"
+    };
+
+    Assimp::Importer importer;
+    const aiScene* scene = nullptr;
+    const char* usedPath = nullptr;
+
+    for (const char* path : tryPaths)
+    {
+        scene = importer.ReadFile(path,
+            aiProcess_Triangulate |
+            aiProcess_FlipUVs |
+            aiProcess_GenNormals |
+            aiProcess_JoinIdenticalVertices);
+
+        if (scene && scene->mRootNode && (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) == 0)
+        {
+            usedPath = path;
+            break;
+        }
+    }
+
+    if (!scene || !usedPath)
+    {
+        OutputDebugStringA(
+            "Tree LOD: ../Models/tree/tree.obj (или ../Models/tree.obj) не найден — LOD0: только крест и билборд.\n");
+        return;
+    }
+
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    uint32_t vertexOffset = 0;
+
+    for (unsigned int m = 0; m < scene->mNumMeshes; ++m)
+    {
+        aiMesh* mesh = scene->mMeshes[m];
+
+        for (unsigned int i = 0; i < mesh->mNumVertices; ++i)
+        {
+            Vertex v{};
+            v.Pos.x = mesh->mVertices[i].x;
+            v.Pos.y = mesh->mVertices[i].y;
+            v.Pos.z = mesh->mVertices[i].z;
+            if (mesh->HasNormals())
+            {
+                v.Normal.x = mesh->mNormals[i].x;
+                v.Normal.y = mesh->mNormals[i].y;
+                v.Normal.z = mesh->mNormals[i].z;
+            }
+            if (mesh->HasTextureCoords(0))
+            {
+                v.TexC.x = mesh->mTextureCoords[0][i].x;
+                v.TexC.y = mesh->mTextureCoords[0][i].y;
+            }
+            vertices.push_back(v);
+        }
+
+        for (unsigned int i = 0; i < mesh->mNumFaces; ++i)
+        {
+            const aiFace& face = mesh->mFaces[i];
+            for (unsigned int j = 0; j < face.mNumIndices; ++j)
+                indices.push_back(face.mIndices[j] + vertexOffset);
+        }
+
+        vertexOffset += mesh->mNumVertices;
+    }
+
+    if (vertices.empty() || indices.empty())
+    {
+        OutputDebugStringA("Tree LOD: пустая геометрия.\n");
+        return;
+    }
+
+    float minY = vertices[0].Pos.y;
+    float maxY = vertices[0].Pos.y;
+    for (const Vertex& v : vertices)
+    {
+        minY = (std::min)(minY, v.Pos.y);
+        maxY = (std::max)(maxY, v.Pos.y);
+    }
+    for (Vertex& v : vertices)
+        v.Pos.y -= minY;
+
+    const float h = (std::max)(maxY - minY, 1e-4f);
+    const float targetHeight = 2.35f;
+    const float s = targetHeight / h;
+    for (Vertex& v : vertices)
+    {
+        v.Pos.x *= s;
+        v.Pos.y *= s;
+        v.Pos.z *= s;
+    }
+
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = "TreeLodMesh";
+
+    const UINT vbByteSize = (UINT)(vertices.size() * sizeof(Vertex));
+    const UINT ibByteSize = (UINT)(indices.size() * sizeof(uint32_t));
+
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+    CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+    CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(Vertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry submesh{};
+    submesh.IndexCount = (UINT)indices.size();
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+    geo->DrawArgs["treeMesh"] = submesh;
+
+    mGeometries[geo->Name] = std::move(geo);
+    mTreeLodMeshLoaded = true;
+
+    char msg[280];
+    sprintf_s(msg, "Tree LOD: загружен %s, вершин=%zu, индексов=%zu\n", usedPath, vertices.size(), indices.size());
+    OutputDebugStringA(msg);
+
+    std::string objPathStr(usedPath);
+    size_t lastSlash = objPathStr.find_last_of("/\\");
+    const std::string baseDir = (lastSlash != std::string::npos) ? objPathStr.substr(0, lastSlash + 1) : std::string();
+
+    std::string diffuseRel;
+    for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi)
+    {
+        aiMesh* mesh = scene->mMeshes[mi];
+        if (mesh->mMaterialIndex < 0)
+            continue;
+        aiMaterial* amat = scene->mMaterials[mesh->mMaterialIndex];
+        aiString tp;
+        if (amat->GetTexture(aiTextureType_DIFFUSE, 0, &tp) == AI_SUCCESS ||
+            amat->GetTexture(aiTextureType_BASE_COLOR, 0, &tp) == AI_SUCCESS)
+        {
+            diffuseRel = tp.C_Str();
+            break;
+        }
+    }
+
+    auto allocNextTreeHeap = [&]() -> int {
+        int nh = 2;
+        for (const auto& kv : mTextureCache)
+            nh = (std::max)(nh, kv.second + 1);
+        nh = (std::max)(nh, (int)kTreeInstanceBillboardSrvHeapIndex + 1);
+        return nh;
+    };
+
+    auto tryLoadTreeDiffusePath = [&](const std::string& fullTexPath, const char* reasonTag) -> bool {
+        const std::string resolved = ResolveMediaPath(fullTexPath);
+        auto cached = mTextureCache.find(resolved);
+        if (cached != mTextureCache.end())
+        {
+            mTreeMtlDiffuseSrvHeapIndex = static_cast<UINT>(cached->second);
+            sprintf_s(msg, "Tree LOD: %s (кэш): %s heap %u\n", reasonTag, resolved.c_str(), mTreeMtlDiffuseSrvHeapIndex);
+            OutputDebugStringA(msg);
+            return true;
+        }
+
+        const int nextHeap = allocNextTreeHeap();
+        mTextures.erase("treeMtlDiffuse");
+        LoadModelTexture(resolved, "treeMtlDiffuse", nextHeap);
+
+        auto it = mTextures.find("treeMtlDiffuse");
+        if (it != mTextures.end() && it->second && it->second->Resource)
+        {
+            mTextureCache[resolved] = nextHeap;
+            mTreeMtlDiffuseSrvHeapIndex = static_cast<UINT>(nextHeap);
+            sprintf_s(msg, "Tree LOD: %s: %s heap %u\n", reasonTag, resolved.c_str(), mTreeMtlDiffuseSrvHeapIndex);
+            OutputDebugStringA(msg);
+            return true;
+        }
+
+        sprintf_s(msg, "Tree LOD: не загрузилось: %s\n", resolved.c_str());
+        OutputDebugStringA(msg);
+        return false;
+    };
+
+    if (!diffuseRel.empty())
+    {
+        std::replace(diffuseRel.begin(), diffuseRel.end(), '\\', '/');
+        std::string fullTexPath;
+        if (!diffuseRel.empty() && diffuseRel[0] != '/' && diffuseRel.find(':') == std::string::npos)
+            fullTexPath = baseDir + diffuseRel;
+        else
+            fullTexPath = diffuseRel;
+
+        tryLoadTreeDiffusePath(fullTexPath, "diffuse из MTL");
+    }
+    else
+        OutputDebugStringA("Tree LOD: в материалах OBJ нет пути к diffuse (проверьте mtllib / map_Kd).\n");
+
+    if (mTreeMtlDiffuseSrvHeapIndex == 0)
+    {
+        static const char* kFolderGuess[] = {
+            "bark.png",
+            "bark.jpg",
+            "leaves.png",
+            "leaves.jpg",
+            "tree.png",
+            "tree.jpg",
+            "tree.jpeg",
+            "tree.dds",
+            "tree.tga",
+            "diffuse.png",
+            "albedo.png",
+            "texture.png",
+            "color.png",
+        };
+        for (const char* guess : kFolderGuess)
+        {
+            const std::string fullTexPath = baseDir + guess;
+            if (tryLoadTreeDiffusePath(fullTexPath, "diffuse рядом с OBJ"))
+                break;
+        }
+    }
+
+    if (mTreeMtlDiffuseSrvHeapIndex == 0)
+        OutputDebugStringA("Tree LOD: нет текстуры для меша — для LOD0 используется та же, что у билборда (../Textures/tree.*).\n");
+}
 
 void CrateApp::LoadTextures()
 {
@@ -1081,7 +1653,7 @@ void CrateApp::BuildDescriptorHeaps()
 {
     OutputDebugStringA("Building descriptor heap...\n");
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = 256;
+    srvHeapDesc.NumDescriptors = kSrvDescriptorHeapSize;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -1158,10 +1730,11 @@ void CrateApp::BuildPSOs()
 void CrateApp::BuildFrameResources()
 {
     OutputDebugStringA("Building frame resources...\n");
+    mBillboardObjectCbIndex = (UINT)mAllRitems.size();
     for (int i = 0; i < gNumFrameResources; ++i)
     {
         mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(),
-            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size()));
+            1, (UINT)mAllRitems.size() + 1u, (UINT)mMaterials.size()));
     }
     OutputDebugStringA("Frame resources built\n");
 }
@@ -1237,6 +1810,22 @@ void CrateApp::BuildMaterials()
     water->TessellationParams = XMFLOAT4(0.35f, 0.0f, 140.0f, 1.0f);
     water->ChessboardParams = XMFLOAT4(1.2f, 1.2f, 0.0f, 1.0f);
     mMaterials["water"] = std::move(water);
+
+    const UINT treeSrv = mBillboardTreeSrvHeapIndex != 0 ? mBillboardTreeSrvHeapIndex : 0u;
+
+    auto billboardTree = std::make_unique<Material>();
+    billboardTree->Name = "billboardTree";
+    billboardTree->MatCBIndex = (int)mMaterials.size();
+    billboardTree->DiffuseSrvHeapIndex = treeSrv;
+    billboardTree->DiffuseSrvHeapIndex2 = treeSrv;
+    billboardTree->NormalSrvHeapIndex = treeSrv;
+    billboardTree->DiffuseAlbedo =
+        mBillboardTreeSrvHeapIndex != 0 ? XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f) : XMFLOAT4(0.85f, 0.95f, 0.78f, 1.0f);
+    billboardTree->FresnelR0 = XMFLOAT3(0.04f, 0.06f, 0.04f);
+    billboardTree->Roughness = 0.55f;
+    billboardTree->TessellationParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+    billboardTree->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+    mMaterials["billboardTree"] = std::move(billboardTree);
 
     OutputDebugStringA("Materials built\n");
 }
@@ -1377,11 +1966,55 @@ void CrateApp::BuildRenderItems()
             mSponzaOpaqueRitems.push_back(e.get());
     }
 
+    ComputeSponzaWorldBounds();
+
     sprintf_s(msg, "Total render items: %zu\n", mAllRitems.size());
     OutputDebugStringA(msg);
     OutputDebugStringA("========================================\n");
     OutputDebugStringA("Render items built\n");
     OutputDebugStringA("========================================\n\n");
+}
+
+void CrateApp::ComputeSponzaWorldBounds()
+{
+    mHasSponzaBounds = false;
+
+    for (const LoadedModel& model : mLoadedModels)
+    {
+        if (model.Name != "Sponza")
+            continue;
+
+        const XMMATRIX world =
+            XMMatrixScaling(0.02f, 0.02f, 0.02f) * XMMatrixTranslation(0.0f, -1.0f, 0.0f);
+
+        XMVECTOR vmin = XMVectorSet(FLT_MAX, FLT_MAX, FLT_MAX, 0.0f);
+        XMVECTOR vmax = XMVectorSet(-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0f);
+        for (const Vertex& v : model.Vertices)
+        {
+            const XMVECTOR p = XMVector3TransformCoord(XMLoadFloat3(&v.Pos), world);
+            vmin = XMVectorMin(vmin, p);
+            vmax = XMVectorMax(vmax, p);
+        }
+
+        constexpr float pad = 1.5f;
+        const XMVECTOR padV = XMVectorSet(pad, pad, pad, 0.0f);
+        XMStoreFloat3(&mSponzaBoundsMin, XMVectorSubtract(vmin, padV));
+        XMStoreFloat3(&mSponzaBoundsMax, XMVectorAdd(vmax, padV));
+        mHasSponzaBounds = true;
+
+        char msg[256];
+        sprintf_s(
+            msg,
+            "Sponza world AABB: (%.2f,%.2f,%.2f) - (%.2f,%.2f,%.2f)\n",
+            mSponzaBoundsMin.x,
+            mSponzaBoundsMin.y,
+            mSponzaBoundsMin.z,
+            mSponzaBoundsMax.x,
+            mSponzaBoundsMax.y,
+            mSponzaBoundsMax.z);
+        OutputDebugStringA(msg);
+        return;
+    }
 }
 
 void CrateApp::BuildStressTestObjects(int& objIndex)
@@ -1400,7 +2033,7 @@ void CrateApp::BuildStressTestObjects(int& objIndex)
     if (drawArg == boxGeo->DrawArgs.end())
         return;
 
-    constexpr int kStressTestCount = 5000;
+    constexpr int kStressTestCount = 800;
     mStressWorldBounds.clear();
     mStressWorldBounds.reserve(kStressTestCount);
 
@@ -1474,40 +2107,254 @@ void CrateApp::UpdateStressVisibility()
     if (mStressRitems.empty())
         return;
 
+    std::vector<size_t> visibleIndices;
+    visibleIndices.reserve(mStressRitems.size());
+
     if (!mFrustumCullEnabled)
     {
-        mStressVisibleRitems = mStressRitems;
-        return;
-    }
-
-    const XMMATRIX view = XMLoadFloat4x4(&mView);
-    const XMMATRIX proj = XMLoadFloat4x4(&mProj);
-
-    BoundingFrustum fr;
-    BoundingFrustum::CreateFromMatrix(fr, proj);
-
-    if (!mKdTreeCullingEnabled)
-    {
-        mStressVisibleRitems.reserve(mStressRitems.size());
+        visibleIndices.resize(mStressRitems.size());
         for (size_t i = 0; i < mStressRitems.size(); ++i)
+            visibleIndices[i] = i;
+    }
+    else
+    {
+        const XMMATRIX view = XMLoadFloat4x4(&mView);
+        const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+
+        BoundingFrustum fr;
+        BoundingFrustum::CreateFromMatrix(fr, proj);
+
+        if (!mKdTreeCullingEnabled)
         {
-            if (FrustumContainsOrIntersectsAABB(fr, view, mStressWorldBounds[i]))
-                mStressVisibleRitems.push_back(mStressRitems[i]);
+            for (size_t i = 0; i < mStressRitems.size(); ++i)
+            {
+                if (FrustumContainsOrIntersectsAABB(fr, view, mStressWorldBounds[i]))
+                    visibleIndices.push_back(i);
+            }
         }
-        return;
+        else
+        {
+            std::vector<int> visibleIds;
+            mKdTree.QueryVisible(mStressWorldBounds, fr, view, visibleIds);
+            visibleIndices.reserve(visibleIds.size());
+            for (int id : visibleIds)
+            {
+                if (id >= 0 && static_cast<size_t>(id) < mStressRitems.size())
+                    visibleIndices.push_back(static_cast<size_t>(id));
+            }
+        }
     }
 
-    std::vector<int> visibleIds;
-    mKdTree.QueryVisible(mStressWorldBounds, fr, view, visibleIds);
-    mStressVisibleRitems.reserve(visibleIds.size());
-    for (int id : visibleIds)
+    if (visibleIndices.size() > kMaxStressDrawsPerFrame)
     {
-        if (id >= 0 && static_cast<size_t>(id) < mStressRitems.size())
-            mStressVisibleRitems.push_back(mStressRitems[static_cast<size_t>(id)]);
+        const XMVECTOR eye = XMLoadFloat3(&mEyePos);
+        std::partial_sort(
+            visibleIndices.begin(),
+            visibleIndices.begin() + static_cast<std::ptrdiff_t>(kMaxStressDrawsPerFrame),
+            visibleIndices.end(),
+            [&](size_t ia, size_t ib)
+            {
+                const XMVECTOR ca = XMLoadFloat3(&mStressWorldBounds[ia].Center);
+                const XMVECTOR cb = XMLoadFloat3(&mStressWorldBounds[ib].Center);
+                const float da = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(ca, eye)));
+                const float db = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(cb, eye)));
+                return da < db;
+            });
+        visibleIndices.resize(kMaxStressDrawsPerFrame);
+    }
+
+    mStressVisibleRitems.reserve(visibleIndices.size());
+    for (size_t index : visibleIndices)
+        mStressVisibleRitems.push_back(mStressRitems[index]);
+}
+
+void CrateApp::UpdateForestLod()
+{
+    if (mForestInstancesCpu.empty() || !mForestMeshMapped || !mForestBillboardMapped)
+        return;
+
+    const XMVECTOR eye = XMLoadFloat3(&mEyePos);
+    const float meshSq = kForestLodMeshDistance * kForestLodMeshDistance;
+
+    TreeInstanceGpu meshBuf[kMaxForestInstances];
+    TreeInstanceGpu billBuf[kMaxForestInstances];
+    UINT nMesh = 0;
+    UINT nBill = 0;
+
+    for (const TreeInstanceGpu& t : mForestInstancesCpu)
+    {
+        XMVECTOR p = XMLoadFloat3(&t.WorldPos);
+        const float d2 = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(p, eye)));
+
+        if (mTreeLodMeshLoaded && d2 < meshSq)
+        {
+            if (nMesh < kMaxForestInstances)
+                meshBuf[nMesh++] = t;
+        }
+        else
+        {
+            if (nBill < kMaxForestInstances)
+                billBuf[nBill++] = t;
+        }
+    }
+
+    mForestMeshCount = nMesh;
+    mForestBillboardCount = nBill;
+
+    if (nMesh > 0)
+        std::memcpy(mForestMeshMapped, meshBuf, (size_t)nMesh * sizeof(TreeInstanceGpu));
+    if (nBill > 0)
+        std::memcpy(mForestBillboardMapped, billBuf, (size_t)nBill * sizeof(TreeInstanceGpu));
+}
+
+void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
+{
+    if (mBillboardForestInstanceCount == 0 || !mRenderingSystem)
+        return;
+    if (mForestMeshCount == 0 && mForestBillboardCount == 0)
+        return;
+
+    auto matIt = mMaterials.find("billboardTree");
+    if (matIt == mMaterials.end())
+        return;
+
+    Material* mat = matIt->second.get();
+
+    const UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+    const UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
+
+    auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+    auto matCB = mCurrFrameResource->MaterialCB->Resource();
+    auto passCB = mCurrFrameResource->PassCB->Resource();
+
+    cmdList->SetGraphicsRootSignature(mRenderingSystem->GetBillboardRootSignature());
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    tex.Offset(mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE nrm(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    nrm.Offset(mat->NormalSrvHeapIndex >= 0 ? mat->NormalSrvHeapIndex : mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE texB(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    const int altIdx = mat->DiffuseSrvHeapIndex2 >= 0 ? mat->DiffuseSrvHeapIndex2 : mat->DiffuseSrvHeapIndex;
+    texB.Offset(altIdx, mCbvSrvDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE checkerTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    checkerTex.Offset(1, mCbvSrvDescriptorSize);
+
+    cmdList->SetGraphicsRootDescriptorTable(0, tex);
+    cmdList->SetGraphicsRootConstantBufferView(1, objectCB->GetGPUVirtualAddress() + (UINT64)mBillboardObjectCbIndex * objCBByteSize);
+    cmdList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+    cmdList->SetGraphicsRootConstantBufferView(3, matCB->GetGPUVirtualAddress() + (UINT64)mat->MatCBIndex * matCBByteSize);
+    cmdList->SetGraphicsRootDescriptorTable(4, checkerTex);
+    cmdList->SetGraphicsRootDescriptorTable(5, texB);
+
+    if (mForestBillboardCount > 0)
+    {
+        auto geoIt = mGeometries.find("BillboardQuad");
+        if (geoIt != mGeometries.end())
+        {
+            MeshGeometry* geo = geoIt->second.get();
+            auto drawArg = geo->DrawArgs.find("tree");
+            if (drawArg != geo->DrawArgs.end())
+            {
+                CD3DX12_GPU_DESCRIPTOR_HANDLE inst(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+                inst.Offset(kTreeInstanceBillboardSrvHeapIndex, mCbvSrvDescriptorSize);
+                cmdList->SetGraphicsRootDescriptorTable(6, inst);
+
+                cmdList->SetPipelineState(mRenderingSystem->GetBillboardTreePSO());
+                auto vbv = geo->VertexBufferView();
+                auto ibv = geo->IndexBufferView();
+                cmdList->IASetVertexBuffers(0, 1, &vbv);
+                cmdList->IASetIndexBuffer(&ibv);
+                cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+                cmdList->DrawIndexedInstanced(
+                    drawArg->second.IndexCount,
+                    mForestBillboardCount,
+                    drawArg->second.StartIndexLocation,
+                    drawArg->second.BaseVertexLocation,
+                    0);
+            }
+        }
+    }
+
+    if (mForestMeshCount > 0 && mTreeLodMeshLoaded)
+    {
+        auto meshIt = mGeometries.find("TreeLodMesh");
+        if (meshIt != mGeometries.end())
+        {
+            MeshGeometry* treeGeo = meshIt->second.get();
+            auto meshArg = treeGeo->DrawArgs.find("treeMesh");
+            if (meshArg != treeGeo->DrawArgs.end())
+            {
+                if (mTreeMtlDiffuseSrvHeapIndex != 0)
+                {
+                    CD3DX12_GPU_DESCRIPTOR_HANDLE texMtl(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+                    texMtl.Offset(mTreeMtlDiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+                    cmdList->SetGraphicsRootDescriptorTable(0, texMtl);
+                    cmdList->SetGraphicsRootDescriptorTable(5, texMtl);
+                }
+
+                CD3DX12_GPU_DESCRIPTOR_HANDLE inst(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+                inst.Offset(kTreeInstanceMeshSrvHeapIndex, mCbvSrvDescriptorSize);
+                cmdList->SetGraphicsRootDescriptorTable(6, inst);
+
+                cmdList->SetPipelineState(mRenderingSystem->GetTreeMeshInstancedPSO());
+                auto vbv = treeGeo->VertexBufferView();
+                auto ibv = treeGeo->IndexBufferView();
+                cmdList->IASetVertexBuffers(0, 1, &vbv);
+                cmdList->IASetIndexBuffer(&ibv);
+                cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+                cmdList->DrawIndexedInstanced(
+                    meshArg->second.IndexCount,
+                    mForestMeshCount,
+                    meshArg->second.StartIndexLocation,
+                    meshArg->second.BaseVertexLocation,
+                    0);
+            }
+        }
     }
 }
 
-void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
+void CrateApp::DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
+{
+    if (!mShadowSystem || ritems.empty())
+        return;
+
+    const UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+    const UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
+    auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+    auto matCB = mCurrFrameResource->MaterialCB->Resource();
+
+    for (const RenderItem* ri : ritems)
+    {
+        if (!ri || !ri->Geo || ri->IsStressObject)
+            continue;
+
+        auto vbv = ri->Geo->VertexBufferView();
+        auto ibv = ri->Geo->IndexBufferView();
+        cmdList->IASetVertexBuffers(0, 1, &vbv);
+        cmdList->IASetIndexBuffer(&ibv);
+        cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE heightSrv(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        heightSrv.Offset(
+            ri->Mat->NormalSrvHeapIndex >= 0 ? ri->Mat->NormalSrvHeapIndex : ri->Mat->DiffuseSrvHeapIndex,
+            mCbvSrvDescriptorSize);
+
+        const D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
+        const D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex * matCBByteSize;
+
+        cmdList->SetGraphicsRootDescriptorTable(4, heightSrv);
+        cmdList->SetGraphicsRootConstantBufferView(0, objCBAddress);
+        cmdList->SetGraphicsRootConstantBufferView(2, matCBAddress);
+        cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
+    }
+}
+
+void CrateApp::DrawRenderItems(
+    ID3D12GraphicsCommandList* cmdList,
+    const std::vector<RenderItem*>& ritems,
+    size_t maxCount)
 {
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
     UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
@@ -1515,7 +2362,8 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
     auto objectCB = mCurrFrameResource->ObjectCB->Resource();
     auto matCB = mCurrFrameResource->MaterialCB->Resource();
 
-    for (size_t i = 0; i < ritems.size(); ++i)
+    const size_t drawCount = (std::min)(ritems.size(), maxCount);
+    for (size_t i = 0; i < drawCount; ++i)
     {
         auto ri = ritems[i];
 
@@ -1604,6 +2452,15 @@ void CrateApp::UpdateObjectCBs(const GameTimer& gt)
             e->NumFramesDirty--;
         }
     }
+
+    {
+        ObjectConstants billObj;
+        const XMMATRIX I = XMMatrixIdentity();
+        XMStoreFloat4x4(&billObj.World, XMMatrixTranspose(I));
+        XMStoreFloat4x4(&billObj.TexTransform, XMMatrixTranspose(I));
+        XMStoreFloat4x4(&billObj.TexTransformDisp, XMMatrixTranspose(I));
+        currObjectCB->CopyData(mBillboardObjectCbIndex, billObj);
+    }
 }
 
 void CrateApp::UpdateMaterialCBs(const GameTimer& gt)
@@ -1662,6 +2519,18 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     currPassCB->CopyData(0, mMainPassCB);
 }
 
+void CrateApp::UpdatePostProcessCB()
+{
+    PostProcessConstants post = {};
+    post.EdgeAndPost = { 0.95f, 0.10f, 0.65f, 1.0f };
+    post.EnableFlags = {
+        mEdgePostEnabled ? 1.0f : 0.0f,
+        mVcrPostEnabled ? 1.0f : 0.0f,
+        0.0f,
+        0.0f };
+    mCurrFrameResource->PostProcessCB->CopyData(0, post);
+}
+
 void CrateApp::UpdateDeferredLightCB()
 {
     XMVECTOR eyePos = XMLoadFloat3(&mEyePos);
@@ -1677,7 +2546,7 @@ void CrateApp::UpdateDeferredLightCB()
         if (mFallingActive[i])
             ++activePointLights;
     }
-    mActivePointLights = activePointLights;
+    mActivePointLights = (std::min)(activePointLights, kMaxPointLightsForShading);
 
     DeferredLightParams params = {};
     params.ActivePointLightCount = mActivePointLights;
@@ -1688,9 +2557,8 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 0.0f;
-        XMVECTOR dirW = XMLoadFloat3(&mDirectionalLights[i].Direction);
-        XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(dirW, XMLoadFloat4x4(&mView)));
-        XMStoreFloat3(&l.Direction, dirV);
+        // Мировое направление: в шейдере lightVec = -Direction (вектор к источнику).
+        XMStoreFloat3(&l.Direction, XMLoadFloat3(&mDirectionalLights[i].Direction));
         l.Strength = mDirectionalLights[i].Strength;
         mCurrFrameResource->DeferredLightBuffer->CopyData(dst, l);
     }
@@ -1698,9 +2566,7 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 1.0f;
-        XMVECTOR posW = XMLoadFloat3(&mPointLights[i].Position);
-        XMVECTOR posV = XMVector3TransformCoord(posW, XMLoadFloat4x4(&mView));
-        XMStoreFloat3(&l.Position, posV);
+        l.Position = mPointLights[i].Position;
         l.Strength = mPointLights[i].Strength;
         l.FalloffStart = mPointLights[i].FalloffStart;
         l.FalloffEnd = mPointLights[i].FalloffEnd;
@@ -1710,13 +2576,8 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 2.0f;
-        XMVECTOR posW = XMLoadFloat3(&mSpotLights[i].Position);
-        XMVECTOR posV = XMVector3TransformCoord(posW, XMLoadFloat4x4(&mView));
-        XMStoreFloat3(&l.Position, posV);
-
-        XMVECTOR dirW = XMLoadFloat3(&mSpotLights[i].Direction);
-        XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(dirW, XMLoadFloat4x4(&mView)));
-        XMStoreFloat3(&l.Direction, dirV);
+        l.Position = mSpotLights[i].Position;
+        l.Direction = mSpotLights[i].Direction;
         l.Strength = mSpotLights[i].Strength;
         l.FalloffStart = mSpotLights[i].FalloffStart;
         l.FalloffEnd = mSpotLights[i].FalloffEnd;

@@ -8,19 +8,12 @@ struct ParticleSystemConstants
     float TotalTime = 0.0f;
     float EmitRate = 200.0f;
     float Gravity = -9.8f;
-
     DirectX::XMFLOAT3 EmitterPos = { 0.0f, 3.0f, -10.0f };
     float MaxLife = 6.0f;
-
     UINT ConsumeCount = 0;
     UINT EmitCount = 0;
     UINT MaxParticles = 0;
-    float FloorY = -1.0f;
-
-    float Restitution = 0.65f;
-    float FloorFriction = 0.82f;
-    float BounceStopVelocity = 0.25f;
-    float Padding = 0.0f;
+    UINT Padding = 0;
 };
 
 class ParticleSystem

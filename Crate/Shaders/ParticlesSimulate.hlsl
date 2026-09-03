@@ -15,19 +15,12 @@ cbuffer ParticleCB : register(b0)
     float gTotalTime;
     float gEmitRate;
     float gGravity;
-
     float3 gEmitterPos;
     float gMaxLife;
-
     uint gConsumeCount;
     uint gEmitCount;
     uint gMaxParticles;
-    float gFloorY;
-
-    float gRestitution;
-    float gFloorFriction;
-    float gBounceStopVelocity;
-    float gPad;
+    uint gPad;
 };
 
 RWStructuredBuffer<Particle> gParticlePool : register(u0);
@@ -53,46 +46,66 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    float lifeRatio = saturate(p.Age / p.Life);
+float3 relativePosition =
+    p.Pos - gEmitterPos;
 
-    // Visuals.
-    p.Size = lerp(0.04f, 0.45f, lifeRatio);
-    p.Color.a = 1.0f - smoothstep(0.15f, 0.95f, lifeRatio);
-    p.Color.rgb = lerp(
-        float3(0.95f, 0.95f, 1.0f),
-        float3(0.55f, 0.55f, 0.65f),
-        lifeRatio * 0.8f);
-
-    // Physics.
-    p.Vel.y += gGravity * gDeltaTime;
-
-    float t = gTotalTime * 0.4f;
-    float3 turb = float3(
-        sin(p.Pos.x * 0.8f + t) * 0.25f,
+float3 horizontalPosition =
+    float3(
+        relativePosition.x,
         0.0f,
-        cos(p.Pos.z * 0.8f + t) * 0.25f);
-    p.Vel += turb * gDeltaTime;
+        relativePosition.z);
 
-    // Frame-rate independent damping. 0.975 is old per-60-FPS-frame damping.
-    p.Vel *= pow(0.975f, gDeltaTime * 60.0f);
+float horizontalDistance =
+    length(horizontalPosition);
 
-    p.Pos += p.Vel * gDeltaTime;
+float3 tangentDirection =
+    float3(0.0f, 0.0f, 0.0f);
 
-    // Floor collision. Size is used as approximate particle radius.
-    float radius = p.Size;
-    if (p.Pos.y - radius < gFloorY)
-    {
-        p.Pos.y = gFloorY + radius;
+if (horizontalDistance > 0.001f)
+{
+    tangentDirection =
+        normalize(float3(
+            -horizontalPosition.z,
+            0.0f,
+            horizontalPosition.x));
+}
 
-        if (p.Vel.y < 0.0f)
-        {
-            p.Vel.y = -p.Vel.y * gRestitution;
-            p.Vel.xz *= gFloorFriction;
+// Сила вращения немного зависит от расстояния до центра.
+float swirlStrength =
+    2.8f /
+    max(horizontalDistance, 0.7f);
 
-            if (abs(p.Vel.y) < gBounceStopVelocity)
-                p.Vel.y = 0.0f;
-        }
-    }
+// Дополнительное вращательное движение.
+p.Vel +=
+    tangentDirection *
+    swirlStrength *
+    gDeltaTime;
+
+// Слабая гравитация.
+p.Vel +=
+    float3(0.0f, gGravity, 0.0f) *
+    gDeltaTime;
+
+// Небольшое вертикальное колебание.
+float verticalWave =
+    sin(
+        gTotalTime * 4.0f +
+        p.Age * 5.0f) *
+    0.45f;
+
+    p.Vel.y +=
+    verticalWave *
+    gDeltaTime;
+
+    p.Vel *= 0.995f;
+
+    p.Pos +=
+    p.Vel *
+    gDeltaTime;
+    p.Color.a = saturate(1.0f - p.Age / max(p.Life, 1e-4f));
+    float prevRemaining = max(p.Life - (p.Age - gDeltaTime), 1e-4f);
+    float remaining = max(p.Life - p.Age, 0.0f);
+    p.Size *= remaining / prevRemaining;
 
     gParticlePool[idx] = p;
     gAliveOut.Append(idx);

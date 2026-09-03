@@ -2,6 +2,7 @@
 
 #include "../Common/d3dUtil.h"
 #include "GBuffer.h"
+#include "FrameResource.h"
 
 class RenderingSystem
 {
@@ -17,6 +18,11 @@ public:
 
     void OnResize(UINT width, UINT height);
 
+    void SetLightingResources(
+        ID3D12Resource* shadowMapResource,
+        UINT shadowCascadeCount,
+        ID3D12Resource* shadowOverlayResource);
+
     void BeginGeometryPass(
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE dsv,
@@ -31,6 +37,7 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
         D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
+        D3D12_GPU_VIRTUAL_ADDRESS shadowLightingCbAddress,
         ID3D12Resource* lightBufferResource,
         UINT lightCount,
         UINT lightStrideBytes);
@@ -42,12 +49,30 @@ public:
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
         bool wireframe);
 
+    void ExecutePostProcessPasses(
+        ID3D12GraphicsCommandList* cmdList,
+        ID3D12Resource* backBuffer,
+        D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
+        D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+        D3D12_GPU_VIRTUAL_ADDRESS postCbAddress,
+        bool enableEdge,
+        bool enableVcr);
+
+    ID3D12RootSignature* GetBillboardRootSignature() const { return mBillboardRootSignature.Get(); }
+    ID3D12PipelineState* GetBillboardTreePSO() const { return mBillboardTreePSO.Get(); }
+    ID3D12PipelineState* GetTreeMeshInstancedPSO() const { return mTreeMeshInstancedPSO.Get(); }
 
 private:
     void BuildGeometryRootSignature();
+    void BuildBillboardRootSignature();
     void BuildLightingRootSignature();
+    void BuildPostProcessRootSignature();
     void BuildShadersAndInputLayout();
+    void BuildBillboardShadersAndLayout();
     void BuildPSOs();
+    void BuildPostProcessResources();
+    void CreatePostProcessSrvs();
+    void CopyBackBufferToScene(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* backBuffer);
 
 private:
     ID3D12Device* mDevice = nullptr;
@@ -60,15 +85,32 @@ private:
     UINT mMsaaQuality = 0;
 
     GBuffer mGBuffer;
+    ID3D12Resource* mShadowMapForLighting = nullptr;
+    UINT mShadowCascadeCountForLighting = 0;
+    ID3D12Resource* mShadowOverlayForLighting = nullptr;
+
+    void CreateLightingSrvs();
 
     std::unordered_map<std::string, Microsoft::WRL::ComPtr<ID3DBlob>> mShaders;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> mBillboardInputLayout;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSignature = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mBillboardRootSignature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSignature = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mPostProcessRootSignature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryWireframePSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mBillboardTreePSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTreeMeshInstancedPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mWaterTransparentPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mWaterTransparentWireframePSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mEdgePostPSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mVcrPostPSO = nullptr;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> mPostSceneCopy = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mPostTempTarget = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mPostRtvHeap = nullptr;
+    UINT mPostRtvDescriptorSize = 0;
 };
