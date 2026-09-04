@@ -21,7 +21,7 @@ cbuffer cbPass : register(b1)
     float gDeltaTime;
     float4 gAmbientLight;
     float4 gUnusedLights[32];
-}
+};
 
 cbuffer cbPost : register(b0)
 {
@@ -125,37 +125,20 @@ float4 PS_Edge(VSOut pin) : SV_Target
 
     float edge = DetectEdge(pin.TexC);
     edge = saturate(edge * gEdgeAndPost.x);
-    float3 edgeColor = float3(0.02f, 0.55f, 0.95f);
-    color.rgb = lerp(color.rgb, edgeColor, edge * 0.72f);
+    float3 edgeColor = float3(0.0f, 0.75f, 1.0f);
+    color.rgb = lerp(color.rgb, edgeColor, edge * 0.82f);
     return color;
 }
 
 float4 PS_VCR(VSOut pin) : SV_Target
 {
     float2 uv = pin.TexC;
-
-    float intensity =
-        saturate(gEdgeAndPost.z);
-
-    float vignetteStrength =
-        saturate(gEdgeAndPost.w);
-
-    float wave =
-        sin(
-            uv.y * 42.0f +
-            gTotalTime * 50.0f)
-        * 0.0018f
-        * intensity;
-
-    uv.x += wave;
-
-    float4 color =
-        gSceneColor.Sample(
-            gsamPointClamp,
-            uv);
-
+    float4 color = gSceneColor.Sample(gsamPointClamp, uv);
     if (gEnableFlags.y < 0.5f)
         return color;
+
+    float intensity = saturate(gEdgeAndPost.z);
+    float vignetteStrength = saturate(gEdgeAndPost.w);
 
     float aspect = gRenderTargetSize.x / max(gRenderTargetSize.y, 1.0f);
     float2 centeredUv = uv - 0.5f;
@@ -207,7 +190,6 @@ float4 PS_VCR(VSOut pin) : SV_Target
     float luma = dot(color.rgb, float3(0.299f, 0.587f, 0.114f));
     color.rgb = lerp(color.rgb, float3(luma, luma, luma), 0.07f * intensity);
 
-    // виньетка
     float vignette = 1.0f - smoothstep(0.22f, 0.82f, dist);
     vignette = lerp(0.06f, 1.0f, saturate(vignette));
     vignette = pow(vignette, 1.25f);

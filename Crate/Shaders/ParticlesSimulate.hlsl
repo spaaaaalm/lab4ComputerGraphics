@@ -46,62 +46,8 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-float3 relativePosition =
-    p.Pos - gEmitterPos;
-
-float3 horizontalPosition =
-    float3(
-        relativePosition.x,
-        0.0f,
-        relativePosition.z);
-
-float horizontalDistance =
-    length(horizontalPosition);
-
-float3 tangentDirection =
-    float3(0.0f, 0.0f, 0.0f);
-
-if (horizontalDistance > 0.001f)
-{
-    tangentDirection =
-        normalize(float3(
-            -horizontalPosition.z,
-            0.0f,
-            horizontalPosition.x));
-}
-
-// Сила вращения немного зависит от расстояния до центра.
-float swirlStrength =
-    2.8f /
-    max(horizontalDistance, 0.7f);
-
-// Дополнительное вращательное движение.
-p.Vel +=
-    tangentDirection *
-    swirlStrength *
-    gDeltaTime;
-
-// Слабая гравитация.
-p.Vel +=
-    float3(0.0f, gGravity, 0.0f) *
-    gDeltaTime;
-
-// Небольшое вертикальное колебание.
-float verticalWave =
-    sin(
-        gTotalTime * 4.0f +
-        p.Age * 5.0f) *
-    0.45f;
-
-    p.Vel.y +=
-    verticalWave *
-    gDeltaTime;
-
-    p.Vel *= 0.995f;
-
-    p.Pos +=
-    p.Vel *
-    gDeltaTime;
+    p.Vel += float3(0.0f, gGravity, 0.0f) * gDeltaTime;
+    p.Pos += p.Vel * gDeltaTime;
     p.Color.a = saturate(1.0f - p.Age / max(p.Life, 1e-4f));
     float prevRemaining = max(p.Life - (p.Age - gDeltaTime), 1e-4f);
     float remaining = max(p.Life - p.Age, 0.0f);

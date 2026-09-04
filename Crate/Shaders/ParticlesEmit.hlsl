@@ -53,23 +53,38 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         (uint)(gTotalTime * 1000.0f) *
         747796405u;
 
-    float randomA = Hash01(seed);
-    float randomB = Hash01(seed * 3u + 11u);
-    float randomC = Hash01(seed * 7u + 23u);
-    float randomD = Hash01(seed * 13u + 31u);
-    float randomE = Hash01(seed * 19u + 41u);
+    float randomA =
+        Hash01(seed);
 
-    float angle = randomA * 6.2831853f;
+    float randomB =
+        Hash01(seed * 3u + 11u);
 
+    float randomC =
+        Hash01(seed * 7u + 23u);
+
+    float randomD =
+        Hash01(seed * 13u + 31u);
+
+    float randomE =
+        Hash01(seed * 19u + 41u);
+
+    // Полный круг вокруг эмиттера.
+    float angle =
+        randomA * 6.2831853f;
+
+    // Начальный радиус частицы.
     float radius =
         lerp(0.15f, 0.75f, randomB);
 
+    // Скорость движения от центра.
     float radialSpeed =
         lerp(0.2f, 0.8f, randomC);
 
+    // Скорость движения вверх.
     float verticalSpeed =
         lerp(1.0f, 2.8f, randomD);
 
+    // Скорость вращения.
     float rotationSpeed =
         lerp(1.5f, 3.5f, randomE);
 
@@ -79,6 +94,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
             0.0f,
             sin(angle));
 
+    // Направление по окружности.
     float3 tangentDirection =
         float3(
             -sin(angle),
@@ -91,36 +107,68 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         gEmitterPos +
         radialDirection * radius;
 
-    p.Age = 0.0f;
+    p.Age =
+        0.0f;
 
-    // Частица получает движение наружу,
-    // движение вверх и движение по касательной.
+    // Частица одновременно:
+    // 1. движется от центра;
+    // 2. движется вверх;
+    // 3. вращается вокруг центра.
     p.Vel =
         radialDirection * radialSpeed +
         tangentDirection * rotationSpeed +
         float3(0.0f, verticalSpeed, 0.0f);
 
     p.Life =
-        lerp(1.8f, gMaxLife, randomA);
+        lerp(
+            1.8f,
+            gMaxLife,
+            randomA);
 
-    // Голубая, синяя или фиолетовая палитра.
-    float colorMix = randomB;
-
+    // Цвета энергетического эффекта.
     float3 cyanColor =
-        float3(0.05f, 0.85f, 1.0f);
+        float3(0.0f, 0.75f, 1.0f);
+
+    float3 blueColor =
+        float3(0.05f, 0.25f, 1.0f);
 
     float3 violetColor =
-        float3(0.55f, 0.15f, 1.0f);
+        float3(0.65f, 0.10f, 1.0f);
 
-    float3 particleColor =
-        lerp(cyanColor, violetColor, colorMix);
+    float colorChoice =
+        randomB;
+
+    float3 particleColor;
+
+    if (colorChoice < 0.45f)
+    {
+        particleColor =
+            lerp(
+                cyanColor,
+                blueColor,
+                colorChoice / 0.45f);
+    }
+    else
+    {
+        particleColor =
+            lerp(
+                blueColor,
+                violetColor,
+                (colorChoice - 0.45f) / 0.55f);
+    }
 
     p.Color =
-        float4(particleColor, 1.0f);
+        float4(
+            particleColor,
+            1.0f);
 
-    // Размер немного меньше, чем у старых частиц.
+    // Частицы немного меньше,
+    // но их движение будет заметнее.
     p.Size =
-        lerp(0.10f, 0.28f, randomC);
+        lerp(
+            0.10f,
+            0.28f,
+            randomC);
 
     p.Pad =
         0.0f.xxx;
@@ -131,6 +179,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     gParticlePool[particleIndex] =
         p;
 
-    gAliveOut.Append(particleIndex);
-    gSortList.Append(particleIndex);
+    gAliveOut.Append(
+        particleIndex);
+
+    gSortList.Append(
+        particleIndex);
 }
