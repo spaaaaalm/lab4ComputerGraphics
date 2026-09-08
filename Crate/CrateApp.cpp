@@ -4078,6 +4078,13 @@ void CrateApp::UpdatePostProcessCB()
         mVcrPostEnabled ? 1.0f : 0.0f,
         0.0f,
         0.0f };
+    post.Fisheye =
+    {
+        0.50f,
+        0.0f,
+        0.0f,
+        0.0f
+    };
     mCurrFrameResource->PostProcessCB->CopyData(0, post);
 }
 

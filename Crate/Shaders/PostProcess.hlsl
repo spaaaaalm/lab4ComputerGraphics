@@ -27,6 +27,7 @@ cbuffer cbPost : register(b0)
 {
     float4 gEdgeAndPost; // x - strenght, y - threshold, z - vcr, w - vinette
     float4 gEnableFlags; // x edge, y vcr
+    float4 gFisheye;     // x - fisheye strength
 }
 
 struct VSOut
@@ -69,6 +70,45 @@ float SampleEdgeMetric(float2 uv, float3 nC, float depthC, float3 posC)
     float depthDiff = abs(depthC - depthN) / max(depthC, 1e-3f);
     float normalDiff = 1.0f - saturate(dot(nC, nN));
     return depthDiff * 5.5f + normalDiff * 3.5f;
+}
+
+float2 ApplyFisheye(float2 screenUv)
+{
+    float aspect =
+        gRenderTargetSize.x /
+        max(gRenderTargetSize.y, 1.0f);
+
+    float2 centeredUv =
+        screenUv - 0.5f;
+
+    float2 centered =
+        float2(
+            centeredUv.x * aspect,
+            centeredUv.y);
+
+    float radius =
+        length(centered);
+
+    float maxRadius =
+        length(float2(aspect * 0.5f, 0.5f));
+
+    float normalizedRadius =
+        saturate(radius / max(maxRadius, 1e-4f));
+
+    float bend =
+        1.0f +
+        gFisheye.x *
+        normalizedRadius *
+        normalizedRadius;
+
+    centered *= bend;
+
+    float2 warpedUv =
+        centered /
+        float2(aspect, 1.0f) +
+        0.5f;
+
+    return saturate(warpedUv);
 }
 
 float DetectEdge(float2 uv)
@@ -129,13 +169,19 @@ float4 PS_Edge(VSOut pin) : SV_Target
     color.rgb = lerp(color.rgb, edgeColor, edge * 0.82f);
     return color;
 }
-
+//добавить рыбий глаз в пост процессе
 float4 PS_VCR(VSOut pin) : SV_Target
 {
-    float2 uv = pin.TexC;
-    float4 color = gSceneColor.Sample(gsamPointClamp, uv);
     if (gEnableFlags.y < 0.5f)
-        return color;
+    {
+        return gSceneColor.Sample(gsamPointClamp, pin.TexC);
+    }
+
+    const float2 screenUv = pin.TexC;
+
+    const float2 uv = ApplyFisheye(screenUv);
+
+    float4 color = gSceneColor.Sample(gsamPointClamp, uv);
 
     float intensity = saturate(gEdgeAndPost.z);
     float vignetteStrength = saturate(gEdgeAndPost.w);

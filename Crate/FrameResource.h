@@ -16,6 +16,7 @@ struct PostProcessConstants
 {
     DirectX::XMFLOAT4 EdgeAndPost = { 0.95f, 0.10f, 0.65f, 1.0f };
     DirectX::XMFLOAT4 EnableFlags = { 1.0f, 1.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT4 Fisheye = { 0.50f, 0.0f, 0.0f, 0.0f };
 };
 
 struct PassConstants
