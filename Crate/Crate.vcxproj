@@ -159,6 +159,7 @@
     <ClCompile Include="CrateApp.cpp" />
     <ClCompile Include="FrameResource.cpp" />
     <ClCompile Include="GBuffer.cpp" />
+    <ClCompile Include="HeightMap.cpp" />
     <ClCompile Include="KdTree.cpp" />
     <ClCompile Include="ParticleSystem.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
@@ -175,6 +176,7 @@
     <ClInclude Include="..\Common\UploadBuffer.h" />
     <ClInclude Include="FrameResource.h" />
     <ClInclude Include="GBuffer.h" />
+    <ClInclude Include="HeightMap.h" />
     <ClInclude Include="Lights.h" />
     <ClInclude Include="KdTree.h" />
     <ClInclude Include="ParticleSystem.h" />
