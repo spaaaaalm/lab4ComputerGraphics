@@ -164,6 +164,7 @@
     <ClCompile Include="ParticleSystem.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="ShadowSystem.cpp" />
+    <ClCompile Include="TerrainChunk.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Common\d3dApp.h" />
@@ -182,6 +183,7 @@
     <ClInclude Include="ParticleSystem.h" />
     <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="ShadowSystem.h" />
+    <ClInclude Include="TerrainChunk.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
