@@ -396,6 +396,29 @@ static bool TryResolvePbrFallbackPath(const std::string& baseDir, const char* fi
     }
     return false;
 }
+struct MonsterTexSet
+{
+    const char* albedo;
+    const char* normal;
+    const char* orm;
+};
+
+static bool TryGetMonsterTexSet(const std::string& matName, MonsterTexSet& out)
+{
+    static const std::map<std::string, MonsterTexSet> kSets = {
+        { "M_Monster_Armor", { "T_Monster_Armor_Albedo_Skin1.png",
+                               "T_Monster_Armor_Normal_SkinAll.png",
+                               "T_Monster_Armor_metalness_rouness_Skin1.png" } },
+        { "M_Monster_Body",  { "T_Monster_Body_Albedo_Skin1.png",
+                               "T_Monster_Body_Normal_SkinAll.png",
+                               "T_Monster_Body_metalness_rouness_Skin1.png" } },
+    };
+    auto it = kSets.find(matName);
+    if (it == kSets.end())
+        return false;
+    out = it->second;
+    return true;
+}
 }
 
 const int gNumFrameResources = 3;
@@ -568,6 +591,7 @@ private:
     bool mHasPbrModel = false;
     bool mHasPbrCerberus = false;
     bool mHasPbrWoodRoot = false;
+    bool mHasPbrMetal = false;
     XMFLOAT3 mPbrWorldCenter = { 0.0f, 0.0f, 0.0f };
     bool mIblTexturesLoaded = false;
     bool mEnableIbl = true;
@@ -1957,6 +1981,7 @@ void CrateApp::LoadPbrModel()
     mHasPbrModel = false;
     mHasPbrCerberus = false;
     mHasPbrWoodRoot = false;
+    mHasPbrMetal = false;
     mMaterialToMetallicHeapIndex.clear();
     mMaterialToRoughnessHeapIndex.clear();
 
@@ -1969,6 +1994,10 @@ void CrateApp::LoadPbrModel()
         "../Models/PBR models/wood_root/Aset_wood_root_M_rkswd_LOD0.fbx",
         "../Models/PBR models/wood_root/wood_root.fbx"
     };
+    const char* metalPaths[] = {
+    "../Models/Monster/SKM_Monster.fbx",
+    "../Models/Monster/SKM_Monster.FBX"
+    };
 
     mHasPbrCerberus = ImportPbrFbxModel(
         cerberusPaths, _countof(cerberusPaths), "PbrCerberus",
@@ -1979,8 +2008,14 @@ void CrateApp::LoadPbrModel()
         "Aset_wood_root_M_rkswd_2K_Normal_LOD0.jpg",
         nullptr,
         "Aset_wood_root_M_rkswd_2K_Roughness.jpg");
+    mHasPbrMetal = ImportPbrFbxModel(
+        metalPaths, _countof(metalPaths), "PbrMonster",
+        "textures/T_Monster_Body_Albedo_Skin1.png",
+        "textures/T_Monster_Body_Normal_SkinAll.png",
+        "textures/T_Monster_Body_metalness_rouness_Skin1.png",
+        nullptr);
 
-    mHasPbrModel = mHasPbrCerberus || mHasPbrWoodRoot;
+    mHasPbrModel = mHasPbrCerberus || mHasPbrWoodRoot || mHasPbrMetal;
     if (!mHasPbrModel)
         OutputDebugStringA("PBR models not found in ../Models/PBR models/ — skipping.\n");
 }
@@ -2023,7 +2058,21 @@ bool CrateApp::ImportPbrFbxModel(
     char msg[512];
     sprintf_s(msg, "PBR model loaded (%s): %s\n", geometryName, loadedPath.c_str());
     OutputDebugStringA(msg);
-
+    sprintf_s(msg, "  numMaterials = %u, numMeshes = %u\n", scene->mNumMaterials, scene->mNumMeshes);
+    OutputDebugStringA(msg);
+    for (unsigned int m = 0; m < scene->mNumMaterials; ++m)
+    {
+        aiString matName;
+        scene->mMaterials[m]->Get(AI_MATKEY_NAME, matName);
+        sprintf_s(msg, "  material[%u]: '%s'\n", m, matName.C_Str());
+        OutputDebugStringA(msg);
+    }
+    for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi)
+    {
+        sprintf_s(msg, "  mesh[%u]: matIdx=%d, name='%s'\n",
+            mi, scene->mMeshes[mi]->mMaterialIndex, scene->mMeshes[mi]->mName.C_Str());
+        OutputDebugStringA(msg);
+    }
     std::string baseDir = loadedPath;
     const size_t slash = baseDir.find_last_of("/\\");
     if (slash != std::string::npos)
@@ -2086,7 +2135,30 @@ bool CrateApp::ImportPbrFbxModel(
         assignIfLoaded(metallicPath, "PBRMetal_", mMaterialToMetallicHeapIndex);
         assignIfLoaded(roughnessPath, "PBRRough_", mMaterialToRoughnessHeapIndex);
 
-        if (fallbackAlbedo && mMaterialToHeapIndex.find(name) == mMaterialToHeapIndex.end())
+        // Сначала проверяем per-material таблицу (Monster и т.п.)
+        MonsterTexSet mset;
+        bool fromMonsterTable = false;
+        if (TryGetMonsterTexSet(matName.C_Str(), mset))
+        {
+            std::string p;
+            if (TryResolvePbrFallbackPath(baseDir, mset.albedo, p))
+            {
+                assignIfLoaded(p, "PBRAlbedo_", mMaterialToHeapIndex);
+                fromMonsterTable = true;
+            }
+            if (TryResolvePbrFallbackPath(baseDir, mset.normal, p))
+                assignIfLoaded(p, "PBRNormal_", mMaterialToBumpHeapIndex);
+            if (TryResolvePbrFallbackPath(baseDir, mset.orm, p))
+                assignIfLoaded(p, "PBRMetal_", mMaterialToMetallicHeapIndex);
+            // ORM идёт и в rough-слот, чтобы шейдер не брал дефолт
+            if (TryResolvePbrFallbackPath(baseDir, mset.orm, p))
+                assignIfLoaded(p, "PBRRough_", mMaterialToRoughnessHeapIndex);
+        }
+
+        // Общий fallback — только если ничего не нашли выше
+        if (!fromMonsterTable &&
+            fallbackAlbedo &&
+            mMaterialToHeapIndex.find(name) == mMaterialToHeapIndex.end())
         {
             std::string fallbackPath;
             if (TryResolvePbrFallbackPath(baseDir, fallbackAlbedo, fallbackPath))
@@ -3265,6 +3337,16 @@ void CrateApp::BuildRenderItems()
     if (mHasPbrWoodRoot)
     {
         AddPbrModelRenderItems("PbrWoodRoot", 1.5f, -29.0f, 0.25f, 4.0f, objIndex);
+    }
+    if (mHasPbrMetal)
+    {
+        AddPbrModelRenderItems(
+            "PbrMonster",
+            0.0f, 0.0f,
+            XM_PIDIV2,
+            3.0f,
+            objIndex
+        );
     }
 
     if (mHasSlenderman)

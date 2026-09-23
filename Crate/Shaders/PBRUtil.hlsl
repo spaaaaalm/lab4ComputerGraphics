@@ -113,7 +113,7 @@ float3 ComputeF0(float3 albedo, float metallic)
 float3 ComputePbrRadiance(
     float3 lightColor,
     float3 L,
-    float3 N,
+    float3 N, 
     float3 V,
     float3 albedo,
     float metallic,
