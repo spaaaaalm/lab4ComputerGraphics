@@ -9,6 +9,7 @@
 #include "ShadowSystem.h"
 #include "KdTree.h"
 #include "ParticleSystem.h"
+#include "TerrainSystem.h"
 #include <DirectXCollision.h>
 #include <memory>
 #include <random>
@@ -421,8 +422,6 @@ static bool TryGetMonsterTexSet(const std::string& matName, MonsterTexSet& out)
 }
 }
 
-const int gNumFrameResources = 3;
-
 struct RenderItem
 {
     RenderItem() = default;
@@ -554,6 +553,7 @@ private:
     std::unique_ptr<RenderingSystem> mRenderingSystem;
     std::unique_ptr<ShadowSystem> mShadowSystem;
     std::unique_ptr<ParticleSystem> mParticleSystem;
+    std::unique_ptr<TerrainSystem> mTerrainSystem;
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
     std::vector<RenderItem*> mSponzaOpaqueRitems;
@@ -663,6 +663,7 @@ private:
     static constexpr UINT kReservedSrvHeapEnd = kParticleSrvHeapStartIndex + kParticleSrvDescriptorCount;
     static constexpr UINT kShadowSrvHeapStartIndex = 500;
     static constexpr UINT kSrvDescriptorHeapSize = 512;
+    static constexpr UINT kTerrainSrvBaseIndex = kReservedSrvHeapEnd;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -777,6 +778,13 @@ bool CrateApp::Initialize()
     CreateWaterPlaneGeometry();
     CreateBoxGeometry();
     CreateBillboardForest();
+    mTerrainSystem = std::make_unique<TerrainSystem>();
+    mTerrainSystem->Initialize(
+        md3dDevice.Get(),
+        mCommandList.Get(),
+        mSrvDescriptorHeap.Get(),
+        mCbvSrvDescriptorSize,
+        kTerrainSrvBaseIndex);
     BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
@@ -1059,6 +1067,11 @@ void CrateApp::Draw(const GameTimer& gt)
         mShadowSystem->MarkShadowMapShaderResource();
 
     UpdateForestLod(mCurrFrameResourceIndex);
+    if (mTerrainSystem)
+    {
+        mTerrainSystem->Update(mView, mProj, mEyePos,
+            mFrustumCullEnabled, (float)mClientWidth, mCurrFrameResourceIndex);
+    }
     mRenderingSystem->UpdateLightBufferSrv(
         mCurrFrameResourceIndex,
         mCurrFrameResource->DeferredLightBuffer->Resource(),
@@ -1124,6 +1137,22 @@ void CrateApp::Draw(const GameTimer& gt)
         mGeometryWireframe);
 
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
+    if (mTerrainSystem)
+    {
+        auto terrainMatIt = mMaterials.find("terrain");
+        if (terrainMatIt != mMaterials.end())
+        {
+            const UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
+            mTerrainSystem->Draw(
+                mCommandList.Get(),
+                mCurrFrameResourceIndex,
+                passAddress,
+                mSrvDescriptorHeap.Get(),
+                mCbvSrvDescriptorSize,
+                mCurrFrameResource->MaterialCB->Resource()->GetGPUVirtualAddress()
+                + (UINT64)terrainMatIt->second->MatCBIndex * matCBByteSize);
+        }
+    }
     DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
     DrawBillboardForest(mCommandList.Get());
 
@@ -3233,7 +3262,22 @@ void CrateApp::BuildMaterials()
         ? XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f)
         : XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
     mMaterials["treeMeshLod"] = std::move(treeMeshLod);
-
+    if (mTerrainSystem)
+    {
+        auto terrain = std::make_unique<Material>();
+        terrain->Name = "terrain";
+        terrain->MatCBIndex = (int)mMaterials.size();
+        terrain->DiffuseSrvHeapIndex = (int)mTerrainSystem->GetDiffuseSrvIndex();
+        terrain->DiffuseSrvHeapIndex2 = (int)mTerrainSystem->GetDiffuseSrvIndex();
+        terrain->NormalSrvHeapIndex = (int)mTerrainSystem->GetHeightSrvIndex(); // slot 4 = heightmap для DS
+        terrain->DiffuseAlbedo = XMFLOAT4(0.62f, 0.71f, 0.52f, 1.0f); // тонировка, если albedo = heightmap
+        terrain->FresnelR0 = XMFLOAT3(0.02f, 0.02f, 0.02f);
+        terrain->Roughness = 0.9f;
+        // x = высота, z = дистанция тесселяции, w = 1 (вкл)
+        terrain->TessellationParams = XMFLOAT4(35.0f, 0.0f, 120.0f, 1.0f);
+        terrain->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        mMaterials["terrain"] = std::move(terrain);
+    }
     OutputDebugStringA("Materials built\n");
 }
 

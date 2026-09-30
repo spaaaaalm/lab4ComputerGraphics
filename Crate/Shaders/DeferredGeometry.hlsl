@@ -142,7 +142,7 @@ DsOut DS(HsPatch patchConst, float3 bary : SV_DomainLocation, const OutputPatch<
 
     float h = gHeightNormalMap.SampleLevel(gsamLinear, uvDisp, 0).r;
     float disp = h * gTessParams.x + gTessParams.y;
-    posW += normalW * disp;
+
 
     float4 posW4 = float4(posW, 1.0f);
     o.PosW = posW;
