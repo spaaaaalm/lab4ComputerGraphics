@@ -56,7 +56,10 @@ private:
     void BuildQuadtree();
     void BuildNode(int nodeIndex, int level);
     void BuildGrid(int quads, MeshGeometry& geo, ID3D12GraphicsCommandList* cmdList);
-
+    void ComputeNodeHeightRange(const DirectX::XMFLOAT2& center, float halfSize, float& outMin, float& outMax) const;
+    void SelectNode(int nodeIndex, const DirectX::BoundingFrustum& fr, const DirectX::XMMATRIX& view,
+        const DirectX::XMVECTOR& eye, float tanHalfFov, float screenWidth, bool cull);
+    void EmitTile(const TerrainNode& node);
 
 private:
     static constexpr float kWorldSize = 512.0f;     // размер ландшафта в мире (квадрат)
@@ -68,5 +71,31 @@ private:
     static constexpr int kHiFromLevel = 3;
     static constexpr int kHeightMapSize = 2048;     
     static constexpr UINT kMaxTiles = 512;
+    static constexpr float kTauPx = 16.0f;          
+    static constexpr float kEpsFactor = 2.0f;       
 
+    ID3D12Device* mDevice = nullptr;
+    UINT mDiffuseSrvIndex = 0;
+    UINT mHeightSrvIndex = 0;
+
+    std::vector<uint8_t> mHeightPixels;             // CPU копия heightmap
+    Microsoft::WRL::ComPtr<ID3D12Resource> mHeightTex;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mHeightUpload;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mDiffuseTex;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mDiffuseUpload;
+
+    std::vector<TerrainNode> mNodes;
+    MeshGeometry mGridHi;
+    MeshGeometry mGridLo;
+
+    struct TileDraw
+    {
+        ObjectConstants Constants;
+        bool UseHiGrid = false;
+    };
+    std::vector<TileDraw> mSelection;
+    std::unique_ptr<UploadBuffer<ObjectConstants>> mTileCB[gNumFrameResources];
+
+    UINT mVisibleCount = 0;
+    UINT mCulledCount = 0;
 };

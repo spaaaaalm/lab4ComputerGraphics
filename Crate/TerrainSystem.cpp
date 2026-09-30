@@ -317,5 +317,259 @@ void TerrainSystem::BuildQuadtree()
     BuildNode(0, 0);
 }
 
+void TerrainSystem::BuildNode(int nodeIndex, int level)
+{
+    TerrainNode& n = mNodes[nodeIndex];
 
+    float minH, maxH;
+    ComputeNodeHeightRange(n.Center, n.HalfSize, minH, maxH);
+    const float skirtPad = kHeightScale * 0.12f + 1.0f;
+    BoundingBox::CreateFromPoints(n.Bounds,
+        XMVectorSet(n.Center.x - n.HalfSize, kBaseY + minH * kHeightScale - skirtPad, n.Center.y - n.HalfSize, 0.0f),
+        XMVectorSet(n.Center.x + n.HalfSize, kBaseY + maxH * kHeightScale + 1.0f, n.Center.y + n.HalfSize, 0.0f));
+
+    if (level >= kMaxDepth)
+        return;
+
+    n.HasChildren = true;
+    const float childHalf = n.HalfSize * 0.5f;
+    const DirectX::XMFLOAT2 offsets[4] = {
+        { -childHalf, -childHalf }, { childHalf, -childHalf },
+        { -childHalf,  childHalf }, { childHalf,  childHalf } };
+    for (int i = 0; i < 4; ++i)
+    {
+        TerrainNode child;
+        child.Center = { n.Center.x + offsets[i].x, n.Center.y + offsets[i].y };
+        child.HalfSize = childHalf;
+        child.Level = level + 1;
+        n.Children[i] = (int)mNodes.size();
+        mNodes.push_back(child);
+        BuildNode(n.Children[i], level + 1);
+    }
+}
+
+void TerrainSystem::BuildGrid(int quads, MeshGeometry& geo, ID3D12GraphicsCommandList* cmdList)
+{
+    const int R = quads;
+    const int S = R + 1;
+
+    std::vector<Vertex> verts;
+    verts.reserve((size_t)S * S + 4 * S);
+    auto vid = [&](int ix, int iz) { return (uint32_t)(iz * S + ix); };
+
+    for (int iz = 0; iz < S; ++iz)
+    {
+        for (int ix = 0; ix < S; ++ix)
+        {
+            Vertex v = {};
+            v.Pos = { -1.0f + 2.0f * ix / R, 0.0f, -1.0f + 2.0f * iz / R };
+            v.Normal = { 0.0f, 1.0f, 0.0f };
+            v.TexC = { ix / (float)R, iz / (float)R };
+            verts.push_back(v);
+        }
+    }
+    /*
+    const uint32_t skirtBase = (uint32_t)(S * S);
+    auto pushSkirt = [&](uint32_t src) {
+        Vertex v = verts[src];
+        v.Normal = { 0.0f, -1.0f, 0.0f };
+        verts.push_back(v);
+        };
+    for (int ix = 0; ix < S; ++ix) pushSkirt(vid(ix, 0));
+    for (int ix = 0; ix < S; ++ix) pushSkirt(vid(ix, R));
+    for (int iz = 0; iz < S; ++iz) pushSkirt(vid(0, iz));
+    for (int iz = 0; iz < S; ++iz) pushSkirt(vid(R, iz));
+    */
+    std::vector<uint32_t> idx;
+    idx.reserve((size_t)R * R * 6 + (size_t)4 * R * 12);
+
+    for (int iz = 0; iz < R; ++iz)
+    {
+        for (int ix = 0; ix < R; ++ix)
+        {
+            const uint32_t k = vid(ix, iz);
+            idx.insert(idx.end(), { k, k + (uint32_t)S, k + 1 });
+            idx.insert(idx.end(), { k + 1, k + (uint32_t)S, k + (uint32_t)S + 1 });
+        }
+    }
+    /*
+    auto skirtQuad = [&](uint32_t t0, uint32_t t1, uint32_t b0, uint32_t b1) {
+        idx.insert(idx.end(), { t0, b0, t1, t1, b0, b1 });
+        idx.insert(idx.end(), { t0, t1, b0, t1, b1, b0 });
+        };
+    for (int i = 0; i < R; ++i)
+    {
+        const uint32_t s0 = skirtBase + (uint32_t)i, s1 = s0 + 1;
+        skirtQuad(vid(i, 0), vid(i + 1, 0), s0, s1);                       // iz=0
+        skirtQuad(vid(i, R), vid(i + 1, R), skirtBase + S + (uint32_t)i, skirtBase + S + (uint32_t)i + 1);
+        skirtQuad(vid(0, i), vid(0, i + 1), skirtBase + 2 * S + (uint32_t)i, skirtBase + 2 * S + (uint32_t)i + 1);
+        skirtQuad(vid(R, i), vid(R, i + 1), skirtBase + 3 * S + (uint32_t)i, skirtBase + 3 * S + (uint32_t)i + 1);
+    }*/
+
+    geo.Name = (quads == kHiGridQuads) ? "TerrainGridHi" : "TerrainGridLo";
+    const UINT vbByteSize = (UINT)(verts.size() * sizeof(Vertex));
+    const UINT ibByteSize = (UINT)(idx.size() * sizeof(uint32_t));
+
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo.VertexBufferCPU));
+    CopyMemory(geo.VertexBufferCPU->GetBufferPointer(), verts.data(), vbByteSize);
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo.IndexBufferCPU));
+    CopyMemory(geo.IndexBufferCPU->GetBufferPointer(), idx.data(), ibByteSize);
+
+    geo.VertexBufferGPU = d3dUtil::CreateDefaultBuffer(mDevice, cmdList,
+        verts.data(), vbByteSize, geo.VertexBufferUploader);
+    geo.IndexBufferGPU = d3dUtil::CreateDefaultBuffer(mDevice, cmdList,
+        idx.data(), ibByteSize, geo.IndexBufferUploader);
+
+    geo.VertexByteStride = sizeof(Vertex);
+    geo.VertexBufferByteSize = vbByteSize;
+    geo.IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo.IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry sub = {};
+    sub.IndexCount = (UINT)idx.size();
+    sub.StartIndexLocation = 0;
+    sub.BaseVertexLocation = 0;
+    geo.DrawArgs["grid"] = sub;
+}
+
+void TerrainSystem::Update(
+    const XMFLOAT4X4& view,
+    const XMFLOAT4X4& proj,
+    const XMFLOAT3& eyePos,
+    bool frustumCullEnabled,
+    float screenWidth,
+    UINT frameIndex)
+{
+    if (frameIndex >= (UINT)gNumFrameResources || !mTileCB[frameIndex])
+        return;
+
+    mVisibleCount = 0;
+    mCulledCount = 0;
+    mSelection.clear();
+
+    const XMMATRIX V = XMLoadFloat4x4(&view);
+    const XMMATRIX P = XMLoadFloat4x4(&proj);
+    BoundingFrustum fr;
+    BoundingFrustum::CreateFromMatrix(fr, P);
+
+    const XMVECTOR eye = XMLoadFloat3(&eyePos);
+    const float tanHalfFov = 1.0f / XMVectorGetY(P.r[1]); 
+
+    SelectNode(0, fr, V, eye, tanHalfFov, screenWidth, frustumCullEnabled);
+    mVisibleCount = (UINT)mSelection.size();
+
+    UploadBuffer<ObjectConstants>* cb = mTileCB[frameIndex].get();
+    for (size_t i = 0; i < mSelection.size(); ++i)
+        cb->CopyData((UINT)i, mSelection[i].Constants);
+}
+
+void TerrainSystem::SelectNode(
+    int nodeIndex,
+    const BoundingFrustum& fr,
+    const XMMATRIX& view,
+    const XMVECTOR& eye,
+    float tanHalfFov,
+    float screenWidth,
+    bool cull)
+{
+    if (mSelection.size() >= kMaxTiles)
+        return;
+
+    const TerrainNode& n = mNodes[nodeIndex];
+
+    if (cull)
+    {
+        BoundingBox viewBox;
+        n.Bounds.Transform(viewBox, view);
+        if (fr.Contains(viewBox) == DirectX::DISJOINT)
+        {
+            ++mCulledCount;
+            return;
+        }
+    }
+
+    const int gridQuads = (n.Level >= kHiFromLevel) ? kHiGridQuads : kLoGridQuads;
+    const float spacing = (n.HalfSize * 2.0f) / (float)gridQuads;   // шаг сетки тайла
+    const float eps = spacing * kEpsFactor;                          // геометрическая ошибка
+    const XMVECTOR c = XMVectorSet(n.Center.x, 0.0f, n.Center.y, 0.0f);
+    const XMVECTOR e = XMVectorSetY(eye, 0.0f);
+    float d = XMVectorGetX(XMVector3Length(XMVectorSubtract(c, e)));
+    d = (std::max)(d, n.HalfSize * 0.5f);   // защита от деления на ~0 над тайлом
+    const float rho = eps * screenWidth / (2.0f * d * tanHalfFov);  // ошибка в пикселях
+
+    if (!n.HasChildren || rho <= kTauPx)
+    {
+        EmitTile(n);
+        return;
+    }
+
+    for (int child : n.Children)
+        SelectNode(child, fr, view, eye, tanHalfFov, screenWidth, cull);
+}
+
+void TerrainSystem::EmitTile(const TerrainNode& n)
+{
+    TileDraw t = {};
+    const XMMATRIX world =
+        XMMatrixScaling(n.HalfSize, 1.0f, n.HalfSize) *
+        XMMatrixTranslation(n.Center.x, kBaseY, n.Center.y);
+    XMStoreFloat4x4(&t.Constants.World, XMMatrixTranspose(world));
+
+    // TexTransform: локальный UV тайла [0,1] -> прямоугольник глобального heightmap
+    const float w = (n.HalfSize * 2.0f) / kWorldSize;
+    const float u0 = n.Center.x / kWorldSize + 0.5f - w * 0.5f;
+    const float v0 = n.Center.y / kWorldSize + 0.5f - w * 0.5f;
+    const XMMATRIX tex =
+        XMMatrixScaling(w, w, 1.0f) *
+        XMMatrixTranslation(u0, v0, 0.0f);
+    XMStoreFloat4x4(&t.Constants.TexTransform, XMMatrixTranspose(tex));
+    XMStoreFloat4x4(&t.Constants.TexTransformDisp, XMMatrixTranspose(tex));
+
+    t.UseHiGrid = (n.Level >= kHiFromLevel);
+    mSelection.push_back(t);
+}
+
+void TerrainSystem::Draw(
+    ID3D12GraphicsCommandList* cmdList,
+    UINT frameIndex,
+    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+    ID3D12DescriptorHeap* srvHeap,
+    UINT cbvSrvDescriptorSize,
+    D3D12_GPU_VIRTUAL_ADDRESS materialCbAddress)
+{
+    if (mSelection.empty() || frameIndex >= (UINT)gNumFrameResources || !mTileCB[frameIndex])
+        return;
+
+    const UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+    ID3D12Resource* objectCB = mTileCB[frameIndex]->Resource();
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE diffuse(srvHeap->GetGPUDescriptorHandleForHeapStart());
+    diffuse.Offset(mDiffuseSrvIndex, cbvSrvDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE height(srvHeap->GetGPUDescriptorHandleForHeapStart());
+    height.Offset(mHeightSrvIndex, cbvSrvDescriptorSize);
+
+    cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
+    cmdList->SetGraphicsRootConstantBufferView(3, materialCbAddress);
+    cmdList->SetGraphicsRootDescriptorTable(0, diffuse);   // gDiffuseMap   (t0, PS)
+    cmdList->SetGraphicsRootDescriptorTable(4, height);    // gHeightNormalMap (t1, DS/PS)
+    cmdList->SetGraphicsRootDescriptorTable(5, diffuse);   // gDiffuseMapB  
+    cmdList->SetGraphicsRootDescriptorTable(6, diffuse);   // gMetallicMap  
+    cmdList->SetGraphicsRootDescriptorTable(7, diffuse);   // gRoughnessMap 
+
+    for (size_t i = 0; i < mSelection.size(); ++i)
+    {
+        const TileDraw& t = mSelection[i];
+        MeshGeometry* geo = t.UseHiGrid ? &mGridHi : &mGridLo;
+
+        cmdList->SetGraphicsRootConstantBufferView(1,
+            objectCB->GetGPUVirtualAddress() + (UINT64)i * objCBByteSize);
+
+        auto vbv = geo->VertexBufferView();
+        auto ibv = geo->IndexBufferView();
+        cmdList->IASetVertexBuffers(0, 1, &vbv);
+        cmdList->IASetIndexBuffer(&ibv);
+        cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+
+        cmdList->DrawIndexedInstanced(geo->DrawArgs["grid"].IndexCount, 1, 0, 0, 0);
+    }
 }
