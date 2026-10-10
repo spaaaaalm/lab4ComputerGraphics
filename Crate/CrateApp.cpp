@@ -853,6 +853,21 @@ void CrateApp::Update(const GameTimer& gt)
 {
     UpdateCamera(gt);
 
+    if (mTerrainSystem)
+    {
+        POINT cursorPos;
+        GetCursorPos(&cursorPos);
+        ScreenToClient(mhMainWnd, &cursorPos);
+
+        bool brushActive = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 &&
+            (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+
+        mTerrainSystem->UpdateBrush(
+            (float)cursorPos.x, (float)cursorPos.y,
+            (float)mClientWidth, (float)mClientHeight,
+            mView, mProj, mEyePos, brushActive);
+    }
+
     mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
     mCurrFrameResource = mFrameResources[mCurrFrameResourceIndex].get();
 

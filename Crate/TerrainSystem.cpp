@@ -76,6 +76,9 @@ void TerrainSystem::Initialize(
     mHeightSrvIndex = srvBaseIndex + 1;
 
     LoadHeightData();
+    GenerateNoiseHeightMap();
+    mBlendMask.assign((size_t)kHeightMapSize * kHeightMapSize, 0);
+    mHeightPixels = mHeightPixelsA; 
     CreateHeightTexture(cmdList, srvHeap, cbvSrvDescriptorSize);
     CreateDiffuseTexture(cmdList, srvHeap, cbvSrvDescriptorSize);
 
@@ -96,14 +99,12 @@ void TerrainSystem::Initialize(
 bool TerrainSystem::LoadHeightData()
 {
     const int kMap = kHeightMapSize;
-    mHeightPixels.assign((size_t)kMap * kMap, 0);
-
+    mHeightPixelsA.assign((size_t)kMap * kMap, 0);
     static const char* kPaths[] = {
         "../Textures/terrain_height.png",
         "../Textures/terrain_height.dds",
         "../Textures/heightmap.png",
         "../Textures/heightmap.dds" };
-
     for (const char* rel : kPaths)
     {
         const std::string path = ResolvePath(rel);
@@ -115,7 +116,6 @@ bool TerrainSystem::LoadHeightData()
             hr = DirectX::LoadFromDDSFile(wpath.c_str(), DirectX::DDS_FLAGS_NONE, &meta, image);
         if (FAILED(hr) || image.GetImageCount() == 0)
             continue;
-
         const DirectX::Image* img = image.GetImage(0, 0, 0);
         for (int y = 0; y < kMap; ++y)
         {
@@ -134,7 +134,7 @@ bool TerrainSystem::LoadHeightData()
                 case DXGI_FORMAT_R32_FLOAT:           v = (uint8_t)(std::clamp(((const float*)srcRow)[sx], 0.0f, 1.0f) * 255.0f); break;
                 default:                              v = 128; break;
                 }
-                mHeightPixels[(size_t)y * kMap + x] = v;
+                mHeightPixelsA[(size_t)y * kMap + x] = v;
             }
         }
         char msg[160];
@@ -142,7 +142,6 @@ bool TerrainSystem::LoadHeightData()
         OutputDebugStringA(msg);
         return true;
     }
-
     for (int y = 0; y < kMap; ++y)
     {
         for (int x = 0; x < kMap; ++x)
@@ -151,8 +150,8 @@ bool TerrainSystem::LoadHeightData()
             float v = Fbm(nx * 6.0f, ny * 6.0f, 6);
             const float dx = nx - 0.5f, dy = ny - 0.5f;
             const float d = sqrtf(dx * dx + dy * dy) * 2.0f;
-            v *= (std::max)(0.0f, 1.0f - d * d); // к краям плавно к нулю
-            mHeightPixels[(size_t)y * kMap + x] =
+            v *= (std::max)(0.0f, 1.0f - d * d);
+            mHeightPixelsA[(size_t)y * kMap + x] =
                 (uint8_t)(std::clamp(v, 0.0f, 1.0f) * 255.0f);
         }
     }
@@ -536,7 +535,14 @@ void TerrainSystem::Draw(
     ID3D12DescriptorHeap* srvHeap,
     UINT cbvSrvDescriptorSize,
     D3D12_GPU_VIRTUAL_ADDRESS materialCbAddress)
+
 {
+    if (mHeightmapDirty)
+    {
+        RebuildFinalHeightmap();
+        UpdateHeightTexture(cmdList);
+        mHeightmapDirty = false;
+    }
     if (mSelection.empty() || frameIndex >= (UINT)gNumFrameResources || !mTileCB[frameIndex])
         return;
 
@@ -572,4 +578,137 @@ void TerrainSystem::Draw(
 
         cmdList->DrawIndexedInstanced(geo->DrawArgs["grid"].IndexCount, 1, 0, 0, 0);
     }
+}
+
+void TerrainSystem::GenerateNoiseHeightMap()
+{
+    const int kMap = kHeightMapSize;
+    mHeightPixelsB.assign((size_t)kMap * kMap, 0);
+    for (int y = 0; y < kMap; ++y)
+    {
+        for (int x = 0; x < kMap; ++x)
+        {
+            const float nx = x / (float)kMap, ny = y / (float)kMap;
+            // Другая частота и смещение для разнообразия
+            float v = Fbm(nx * 12.0f + 42.5f, ny * 12.0f + 17.3f, 5);
+            const float dx = nx - 0.5f, dy = ny - 0.5f;
+            const float d = sqrtf(dx * dx + dy * dy) * 2.0f;
+            v *= (std::max)(0.0f, 1.0f - d * d);
+            mHeightPixelsB[(size_t)y * kMap + x] =
+                (uint8_t)(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+        }
+    }
+    OutputDebugStringA("Terrain: noise heightmap B generated.\n");
+}
+
+void TerrainSystem::RebuildFinalHeightmap()
+{
+    const size_t total = (size_t)kHeightMapSize * kHeightMapSize;
+    for (size_t i = 0; i < total; ++i)
+    {
+        float mask = mBlendMask[i] / 255.0f;
+        float a = (float)mHeightPixelsA[i];
+        float b = (float)mHeightPixelsB[i];
+        float result = a + (b - a) * mask;
+        mHeightPixels[i] = (uint8_t)(std::max)(0.0f, (std::min)(255.0f, result));
+    }
+}
+
+void TerrainSystem::UpdateHeightTexture(ID3D12GraphicsCommandList* cmdList)
+{
+    auto barrier1 = CD3DX12_RESOURCE_BARRIER::Transition(
+        mHeightTex.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->ResourceBarrier(1, &barrier1);
+
+    D3D12_SUBRESOURCE_DATA sub = {};
+    sub.pData = mHeightPixels.data();
+    sub.RowPitch = kHeightMapSize;
+    sub.SlicePitch = sub.RowPitch * kHeightMapSize;
+    UpdateSubresources(cmdList, mHeightTex.Get(), mHeightUpload.Get(), 0, 0, 1, &sub);
+
+    auto barrier2 = CD3DX12_RESOURCE_BARRIER::Transition(
+        mHeightTex.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &barrier2);
+}
+
+void TerrainSystem::UpdateBrush(
+    float screenX, float screenY,
+    float screenWidth, float screenHeight,
+    const DirectX::XMFLOAT4X4& view,
+    const DirectX::XMFLOAT4X4& proj,
+    const DirectX::XMFLOAT3& eyePos,
+    bool isActive)
+{
+    if (!isActive) return;
+    if (screenX < 0 || screenX >= screenWidth || screenY < 0 || screenY >= screenHeight) return;
+
+    // NDC координаты
+    float ndcX = (2.0f * screenX / screenWidth) - 1.0f;
+    float ndcY = 1.0f - (2.0f * screenY / screenHeight);
+
+    // Луч из камеры
+    XMMATRIX viewProj = XMLoadFloat4x4(&view) * XMLoadFloat4x4(&proj);
+    XMMATRIX invViewProj = XMMatrixInverse(nullptr, viewProj);
+    XMVECTOR nearPoint = XMVectorSet(ndcX, ndcY, 0.0f, 1.0f);
+    XMVECTOR farPoint = XMVectorSet(ndcX, ndcY, 1.0f, 1.0f);
+    nearPoint = XMVector4Transform(nearPoint, invViewProj);
+    farPoint = XMVector4Transform(farPoint, invViewProj);
+    nearPoint = XMVectorScale(nearPoint, 1.0f / XMVectorGetW(nearPoint));
+    farPoint = XMVectorScale(farPoint, 1.0f / XMVectorGetW(farPoint));
+
+    XMVECTOR rayDir = XMVectorSubtract(farPoint, nearPoint);
+    rayDir = XMVector3Normalize(rayDir);
+    XMVECTOR rayOrigin = XMLoadFloat3(&eyePos);
+
+    // Пересечение с плоскостью y = kBaseY
+    float rayDirY = XMVectorGetY(rayDir);
+    if (fabsf(rayDirY) < 1e-6f) return;
+    float t = (kBaseY - XMVectorGetY(rayOrigin)) / rayDirY;
+    if (t < 0.0f) return;
+
+    XMVECTOR hitPoint = XMVectorAdd(rayOrigin, XMVectorScale(rayDir, t));
+    float hitX = XMVectorGetX(hitPoint);
+    float hitZ = XMVectorGetZ(hitPoint);
+
+    // UV heightmap
+    float u = (hitX / kWorldSize) + 0.5f;
+    float v = (hitZ / kWorldSize) + 0.5f;
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return;
+
+    // Пиксели
+    int px = (int)(u * (kHeightMapSize - 1));
+    int py = (int)(v * (kHeightMapSize - 1));
+
+    // Параметры кисти
+    const float brushRadiusWorld = 12.0f;
+    const float brushRadiusPx = (brushRadiusWorld / kWorldSize) * kHeightMapSize;
+    const float brushStrength = 0.25f;
+
+    int r = (int)ceilf(brushRadiusPx);
+    for (int dy = -r; dy <= r; ++dy)
+    {
+        for (int dx = -r; dx <= r; ++dx)
+        {
+            int x = px + dx;
+            int y = py + dy;
+            if (x < 0 || x >= kHeightMapSize || y < 0 || y >= kHeightMapSize) continue;
+
+            float dist = sqrtf((float)(dx * dx + dy * dy));
+            if (dist > brushRadiusPx) continue;
+
+            float falloff = 1.0f - (dist / brushRadiusPx);
+            falloff = falloff * falloff;
+
+            float add = brushStrength * falloff * 255.0f;
+            size_t idx = (size_t)y * kHeightMapSize + x;
+            int newVal = (int)mBlendMask[idx] + (int)add;
+            mBlendMask[idx] = (uint8_t)(std::min)(255, newVal);
+        }
+    }
+
+    mHeightmapDirty = true;
 }

@@ -44,6 +44,15 @@ public:
         UINT cbvSrvDescriptorSize,
         D3D12_GPU_VIRTUAL_ADDRESS materialCbAddress);
 
+    void UpdateBrush(
+        float screenX, float screenY,
+        float screenWidth, float screenHeight,
+        const DirectX::XMFLOAT4X4& view,
+        const DirectX::XMFLOAT4X4& proj,
+        const DirectX::XMFLOAT3& eyePos,
+        bool isActive);
+
+
     UINT GetDiffuseSrvIndex() const { return mDiffuseSrvIndex; }
     UINT GetHeightSrvIndex() const { return mHeightSrvIndex; }
     UINT GetVisibleTileCount() const { return mVisibleCount; }
@@ -87,6 +96,16 @@ private:
     std::vector<TerrainNode> mNodes;
     MeshGeometry mGridHi;
     MeshGeometry mGridLo;
+
+    std::vector<uint8_t> mHeightPixelsA;    
+    std::vector<uint8_t> mHeightPixelsB;    // шумовая карта замещения
+    std::vector<uint8_t> mBlendMask;        // маска кисти: 0=A, 255=B
+    bool mHeightmapDirty = false;
+
+    void GenerateNoiseHeightMap();
+    void RebuildFinalHeightmap();
+    void UpdateHeightTexture(ID3D12GraphicsCommandList* cmdList);
+
 
     struct TileDraw
     {
