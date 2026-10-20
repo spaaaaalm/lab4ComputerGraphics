@@ -28,6 +28,8 @@ void RenderingSystem::Initialize(
     BuildBillboardShadersAndLayout();
     BuildPSOs();
     BuildPostProcessResources();
+    BuildTaaResolveRootSignature();
+    BuildTaaResources();
 }
 
 void RenderingSystem::OnResize(UINT width, UINT height)
@@ -36,6 +38,7 @@ void RenderingSystem::OnResize(UINT width, UINT height)
     mHeight = height;
     mGBuffer.OnResize(width, height);
     BuildPostProcessResources();
+    BuildTaaResources();
 }
 
 void RenderingSystem::SetLightingResources(
@@ -179,7 +182,8 @@ void RenderingSystem::BeginGeometryPass(
         mGBuffer.GetRtv(0),
         mGBuffer.GetRtv(1),
         mGBuffer.GetRtv(2),
-        mGBuffer.GetRtv(3)
+        mGBuffer.GetRtv(3),
+        mGBuffer.GetRtv(4)
     };
     cmdList->OMSetRenderTargets(GBuffer::BufferCount, rtvs, false, &dsv);
 
@@ -461,6 +465,9 @@ void RenderingSystem::BuildShadersAndInputLayout()
     mShaders["solidGeometryPS"] = d3dUtil::CompileShader(L"Shaders\\SolidGeometry.hlsl", nullptr, "PS", "ps_5_0");
     mShaders["deferredLightVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["deferredLightPS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "PS", "ps_5_0");
+    mShaders["taaResolveVS"] = d3dUtil::CompileShader(L"Shaders\\TaaResolve.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["taaResolvePS"] = d3dUtil::CompileShader(L"Shaders\\TaaResolve.hlsl", nullptr, "PS_TaaResolve", "ps_5_0");
+
 
     mShaders["postVS"] = d3dUtil::CompileShader(L"Shaders\\PostProcess.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["postEdgePS"] = d3dUtil::CompileShader(L"Shaders\\PostProcess.hlsl", nullptr, "PS_Edge", "ps_5_0");
@@ -528,6 +535,7 @@ void RenderingSystem::BuildPSOs()
     geometryPsoDesc.RTVFormats[1] = GBuffer::NormalFormat;
     geometryPsoDesc.RTVFormats[2] = GBuffer::MaterialFormat;
     geometryPsoDesc.RTVFormats[3] = GBuffer::PositionFormat;
+    geometryPsoDesc.RTVFormats[4] = GBuffer::VelocityFormat;
     geometryPsoDesc.SampleDesc.Count = 1;
     geometryPsoDesc.SampleDesc.Quality = 0;
     geometryPsoDesc.DSVFormat = mDepthStencilFormat;
@@ -725,6 +733,22 @@ void RenderingSystem::BuildPSOs()
         mShaders["postVcrPS"]->GetBufferSize()
     };
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&postPsoDesc, IID_PPV_ARGS(&mVcrPostPSO)));
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC taaPsoDesc = {};
+    taaPsoDesc.InputLayout = { nullptr, 0 };
+    taaPsoDesc.pRootSignature = mTaaResolveRootSignature.Get();
+    taaPsoDesc.VS = { reinterpret_cast<BYTE*>(mShaders["taaResolveVS"]->GetBufferPointer()), mShaders["taaResolveVS"]->GetBufferSize() };
+    taaPsoDesc.PS = { reinterpret_cast<BYTE*>(mShaders["taaResolvePS"]->GetBufferPointer()), mShaders["taaResolvePS"]->GetBufferSize() };
+    taaPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    taaPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    taaPsoDesc.DepthStencilState.DepthEnable = false;
+    taaPsoDesc.DepthStencilState.StencilEnable = false;
+    taaPsoDesc.SampleMask = UINT_MAX;
+    taaPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    taaPsoDesc.NumRenderTargets = 1;
+    taaPsoDesc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    taaPsoDesc.SampleDesc.Count = 1;
+    taaPsoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&taaPsoDesc, IID_PPV_ARGS(&mTaaResolvePSO)));
 }
 
 void RenderingSystem::BuildPostProcessRootSignature()
@@ -996,4 +1020,90 @@ void RenderingSystem::BeginTransparentWaterPass(
     cmdList->SetPipelineState(wireframe ? mWaterTransparentWireframePSO.Get() : mWaterTransparentPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
     cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
+}
+
+void RenderingSystem::BuildTaaResolveRootSignature()
+{
+    CD3DX12_DESCRIPTOR_RANGE currentSrv; currentSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE historySrv; historySrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    CD3DX12_DESCRIPTOR_RANGE velocitySrv; velocitySrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
+
+    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+    slotRootParameter[0].InitAsDescriptorTable(1, &currentSrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[1].InitAsDescriptorTable(1, &historySrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[2].InitAsDescriptorTable(1, &velocitySrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[3].InitAsConstantBufferView(0);
+
+    CD3DX12_STATIC_SAMPLER_DESC pointClamp(0, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter, 1, &pointClamp, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    ComPtr<ID3DBlob> serializedRootSig, errorBlob;
+    ThrowIfFailed(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf()));
+    ThrowIfFailed(mDevice->CreateRootSignature(0, serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(), IID_PPV_ARGS(mTaaResolveRootSignature.GetAddressOf())));
+}
+
+void RenderingSystem::ExecuteTaaPass(
+    ID3D12GraphicsCommandList* cmdList,
+    D3D12_GPU_VIRTUAL_ADDRESS taaCbAddress)
+{
+    // 1. Transition History to Render Target
+    auto barrier1 = CD3DX12_RESOURCE_BARRIER::Transition(mTaaHistory.Get(), mTaaHistoryState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmdList->ResourceBarrier(1, &barrier1);
+
+    // 2. Setup
+    D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float)mWidth, (float)mHeight, 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, (LONG)mWidth, (LONG)mHeight };
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
+    ID3D12DescriptorHeap* heaps[] = { mGBuffer.GetSrvHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+    cmdList->SetGraphicsRootSignature(mTaaResolveRootSignature.Get());
+    cmdList->SetPipelineState(mTaaResolvePSO.Get());
+    cmdList->SetGraphicsRootConstantBufferView(3, taaCbAddress);
+
+    // SRV: Current (Lighting result), History, Velocity (GBuffer index 4)
+    cmdList->SetGraphicsRootDescriptorTable(0, mGBuffer.GetSrvGpu(GBuffer::PostSceneSrvIndex)); // Используем существующий как заглушку, или создай новый индекс для mTaaCurrent
+    // ЛУЧШЕ: передай mTaaCurrent напрямую через отдельный heap или добавь его в GBuffer SRV. 
+    // Для минимизации изменений, давай создадим SRV для mTaaCurrent динамически или используем временный heap.
+    // Упрощенный вариант: используем mTaaCurrent как SRV через временный дескриптор (если есть место) или добавим в GBuffer.
+
+    // Самый простой способ без ломания GBuffer:
+    // Мы уже записали Lighting в mTaaCurrent. Нам нужно прочитать его.
+    // Давай просто сделаем CopyResource из mTaaCurrent в mPostSceneCopy, который уже имеет SRV в GBuffer!
+
+    // ВМЕСТО СЛОЖНЫХ SRV, сделаем так:
+    // Lighting пишет в mTaaCurrent -> CopyResource(mTaaCurrent, mPostSceneCopy) -> TAA читает mPostSceneCopy (GBuffer::PostSceneSrvIndex)
+
+    auto copyBarrier = CD3DX12_RESOURCE_BARRIER::Transition(mTaaCurrent.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->ResourceBarrier(1, &copyBarrier);
+    cmdList->CopyResource(mPostSceneCopy.Get(), mTaaCurrent.Get());
+    auto srvBarrier = CD3DX12_RESOURCE_BARRIER::Transition(mTaaCurrent.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmdList->ResourceBarrier(1, &srvBarrier);
+
+    // Теперь настраиваем дескрипторы для TAA
+    cmdList->SetGraphicsRootDescriptorTable(0, mGBuffer.GetSrvGpu(GBuffer::PostSceneSrvIndex)); // Current
+    cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSrvGpu(GBuffer::PostTempSrvIndex));  // History (переиспользуем PostTemp как History для простоты, или создай отдельный)
+    cmdList->SetGraphicsRootDescriptorTable(2, mGBuffer.GetSrvGpu(4)); // Velocity (Index 4!)
+
+    cmdList->OMSetRenderTargets(1, &mTaaRtvHeap->GetCPUDescriptorHandleForHeapStart(), false, nullptr);
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmdList->DrawInstanced(3, 1, 0, 0);
+
+    // 3. Transition History back to SRV
+    auto barrier2 = CD3DX12_RESOURCE_BARRIER::Transition(mTaaHistory.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &barrier2);
+    mTaaHistoryState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    // 4. Copy History to BackBuffer (или в PostProcess)
+    auto toCopyDest = CD3DX12_RESOURCE_BARRIER::Transition(mPostSceneCopy.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    auto toCopySrc = CD3DX12_RESOURCE_BARRIER::Transition(mTaaHistory.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_RESOURCE_BARRIER copyBars[2] = { toCopyDest, toCopySrc };
+    cmdList->ResourceBarrier(2, copyBars);
+    cmdList->CopyResource(mPostSceneCopy.Get(), mTaaHistory.Get());
+
+    auto backToSrv = CD3DX12_RESOURCE_BARRIER::Transition(mPostSceneCopy.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    auto backToRt = CD3DX12_RESOURCE_BARRIER::Transition(mTaaHistory.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    D3D12_RESOURCE_BARRIER backBars[2] = { backToSrv, backToRt };
+    cmdList->ResourceBarrier(2, backBars);
 }

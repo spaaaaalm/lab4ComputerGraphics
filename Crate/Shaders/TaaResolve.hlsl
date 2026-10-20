@@ -69,7 +69,7 @@ float4 PS_TaaResolve(VSOut pin) : SV_Target
     float3 current = gCurrentColor.Sample(gsamPointClamp, pin.TexC).rgb;
     float3 history = gHistoryColor.Sample(gsamPointClamp, historyUV).rgb;
     
-    // 4. Neighborhood Clamping (AABB) - ОБЯЗАТЕЛЬНО для сдачи
+    // 4. Neighborhood Clamping (AABB) 
     float3 minColor = GetMin3x3(pin.TexC);
     float3 maxColor = GetMax3x3(pin.TexC);
     history = clamp(history, minColor, maxColor);
