@@ -27,6 +27,12 @@ struct PassConstants
     DirectX::XMFLOAT4X4 InvProj = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 ViewProj = MathHelper::Identity4x4();
     DirectX::XMFLOAT4X4 InvViewProj = MathHelper::Identity4x4();
+
+    DirectX::XMFLOAT4X4 PrevViewProj = MathHelper::Identity4x4();
+    DirectX::XMFLOAT2 Jitter = { 0.0f, 0.0f };
+    float Pad0 = 0.0f; // Выравнивание до 16 байт
+    float Pad1 = 0.0f; // Выравнивание до 16 байт
+
     DirectX::XMFLOAT3 EyePosW = { 0.0f, 0.0f, 0.0f };
     float cbPerObjectPad1 = 0.0f;
     DirectX::XMFLOAT2 RenderTargetSize = { 0.0f, 0.0f };

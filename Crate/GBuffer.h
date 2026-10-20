@@ -5,7 +5,7 @@
 class GBuffer
 {
 public:
-    static constexpr UINT BufferCount = 4;
+    static constexpr UINT BufferCount = 5;
     static constexpr UINT LightBufferSrvCount = 3;
     static constexpr UINT StaticLightingSrvCount = 5;
     static constexpr UINT ExtraLightingSrvCount = LightBufferSrvCount + StaticLightingSrvCount;
@@ -25,6 +25,7 @@ public:
     static constexpr DXGI_FORMAT NormalFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     static constexpr DXGI_FORMAT MaterialFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     static constexpr DXGI_FORMAT PositionFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    static constexpr DXGI_FORMAT VelocityFormat = DXGI_FORMAT_R16G16_FLOAT;
 
 public:
     void Initialize(ID3D12Device* device, UINT width, UINT height);
@@ -53,7 +54,8 @@ private:
         AlbedoFormat,
         NormalFormat,
         MaterialFormat,
-        PositionFormat
+        PositionFormat,
+        VelocityFormat
     };
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mRtvHeap = nullptr;
