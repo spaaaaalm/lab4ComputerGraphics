@@ -22,6 +22,9 @@ cbuffer cbPass : register(b1)
     float4x4 gInvProj;
     float4x4 gViewProj;
     float4x4 gInvViewProj;
+    float4x4 gPrevViewProj;
+    float2 gJitter;        
+    float2 gPadJitter; 
     float3 gEyePosW;
     float cbPerObjectPad1;
     float2 gRenderTargetSize;
@@ -31,7 +34,7 @@ cbuffer cbPass : register(b1)
     float gTotalTime;
     float gDeltaTime;
     float4 gAmbientLight;
-    float4 gLights[MaxLights * 2];
+    float4 gUnusedLights[32];
 }
 
 cbuffer cbMaterial : register(b2)
@@ -83,6 +86,7 @@ struct GBufferOut
     float4 Normal : SV_Target1;
     float4 Material : SV_Target2;
     float4 Position : SV_Target3;
+    float2 Velocity : SV_Target4; 
 };
 
 VsOut VS(VertexIn vin)
@@ -206,5 +210,14 @@ GBufferOut PS(DsOut pin)
     }
     gout.Material = float4(metallic, roughness, ao, 1.0f);
     gout.Position = float4(pin.PosW, pin.PosV.z);
+    float4 curClip = mul(float4(pin.PosW, 1.0), gViewProj);
+    float4 prevClip = mul(float4(pin.PosW, 1.0), gPrevViewProj);
+
+    curClip.xy /= curClip.w;
+    prevClip.xy /= prevClip.w;
+
+    float2 curUV = curClip.xy * 0.5 + 0.5;
+    float2 prevUV = prevClip.xy * 0.5 + 0.5;
+    gout.Velocity = prevUV - curUV; 
     return gout;
 }
